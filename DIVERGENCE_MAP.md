@@ -19,6 +19,10 @@ pristine を改変したら必ずここに記録する（マージ衝突解決�
 | arch/arm_m_gcc/common/*.py（3個） | add | musca_b1 が使う ARM-M コア共通層。`fmp3_pico_sdk` の同名 `.py` は3.3.0時代の古い構造（ベクタテーブル生成がcore側、チェックが2テーブルindex方式）のため単純コピー不可と判明し、pristine現物の `.trb`（3.4.0）から書き直した。計画B | - |
 | arch/arm_m_gcc/musca_b1/chip_kernel.py | add | musca_b1 chip 層。前例なし・全数新規（`fmp3_pico_sdk` に musca_b1 は無い）。計画B | - |
 | target/polarfire_soc_kit_gcc/*.py（3個） | add | polarfire ターゲット層。前例なし・全数新規。計画B | - |
+| arch/riscv_gcc/common/clic_kernel.py | add | ESP32-P4 の CLIC 依存部（pristine `clic_kernel.trb` の Python 版）。`plic_kernel.py` と同型。ESP32-P4 統合 Phase 0（2026-08-13） | - |
+| arch/riscv_gcc/esp32p4/chip_kernel.py | add | esp32p4 chip 層（pristine `chip_kernel.trb` の Python 版）。polarfire 版との差は割込み線数（0..47）・`pid2cidx`（`prcid-1`）・include 先（`clic_kernel.py`）の3点のみ。ESP32-P4 統合 Phase 0（2026-08-13） | - |
+| target/m5stamp_esp32p4_gcc/*.py（3個） | add | m5stamp ターゲット層。**`target/polarfire_soc_kit_gcc/*.py` とバイト同一で流用**（対応する `.trb` 3本が polarfire 版とバイト同一であることを `cmp` で実測。`target/rp2350_pico2_gcc/target_class.py` を musca_b1 版から流用したのと同じ扱い）。ESP32-P4 統合 Phase 0（2026-08-13） | - |
+| tools/cfg_equivalence_m5stamp.sh | add | m5stamp 用の cfg 差分等価性検査。`tools/cfg_equivalence.sh` は CMake(ninja) の build から cfg コマンド行を取るが m5stamp はまだ CMake 層を持たないため、classic（configure.rb+make）で artifacts を作ってから Ruby/Python の両エンジンを回す。`--selftest` は .py を6通りに壊してすべて検出できることを実演する（always-pass でないことの証拠）。CMake 層ができたら `cfg_equivalence.sh` へ一本化して廃止してよい | - |
 | target/musca_b1_gcc/*.py（3個） | add | musca_b1 ターゲット層。前例なし・全数新規。`target_kernel.py` は3.4.0で `core_kernel.trb` から移動してきたベクタテーブル／例外テーブル生成ロジックを含む。計画B | - |
 | target/rp2350_pico2_gcc/{target.cmake,presets.json} | add | Makefile.target の CMake 版。ARM-M（arm_m_gcc/rp2350 chip 層）。QEMU に RP2350/Pico のマシンモデルが無い（8.2.2/11.0.1 とも `-machine help` で確認済み）ため `FMP3_RUN_COMMAND` は定義しない＝`run` ターゲット自体を生成しない（ビルド専用、意図的）。計画C Task 1 | - |
 | arch/arm_m_gcc/rp2350/{chip.cmake,chip_kernel.py} | add | rp2350 chip 層。前例なし・全数新規（`fmp3_pico_sdk` に rp2350 は無い）。計画C Task 1 | - |
@@ -124,8 +128,13 @@ pristine を改変したら必ずここに記録する（マージ衝突解決�
   r593 作業コピーと `diff -rq` でバイト一致することを実測した（svn 側にのみ
   `E_PACKAGE`＝リリースパッケージ生成用の制御ファイルがあり、これは公開パッケージには
   入らないので取り込まない）。
-  **未了**: CMake 層（`target.cmake` / `presets.json`）と cfg_py 層（`target_*.py`、
-  `arch/riscv_gcc/esp32p4/chip_kernel.py`）は未作成。これらは Phase 1 の作業。
+  **cfg_py 層は同日に追従済み**（下記の add 行 4 件）。**未了**: CMake 層
+  （`target/m5stamp_esp32p4_gcc/{target.cmake,presets.json}` と
+  `arch/riscv_gcc/esp32p4/chip.cmake`）は未作成＝`FMP3_TARGET=m5stamp_esp32p4_gcc` は
+  configure できない。なお m5stamp の実機成果物は FMP3 単体の ELF ではなく
+  `libfmp3.a` を ESP-IDF アプリ（`tools/fmp_loader`）へ静的リンクしたもの
+  （`tools/fmp_loader/build_fmp3_lib.sh`）なので、汎用 CMake 層（`fmp` 実行ファイルを
+  リンクする形）へどう載せるかは設計判断が要る。これは Phase 1 の作業。
 
 - **（2026-07-19 解消）`cfg_py/cfg.py`（計画Aの中身）が pristine の `cfg/cfg.rb` へ委譲する薄いシムであった件。**
   計画B（`docs/superpowers/plans/2026-07-19-fmp3-cmake-b-python-cfg.md`）で asp3_core 1.7.1 の
