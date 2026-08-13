@@ -1,0 +1,175 @@
+#
+#    Makefile のターゲット依存部（M5Stamp ESP32P4 用）
+#    polarfire_soc_kit 版をベースに ESP32-P4 / M5Stamp 向けに書き換え。
+#    ブートは ESP-IDF 2nd ブートローダに委譲し、FMP3 はアプリイメージとして起動する。
+#
+
+#
+#  ボード名
+#
+ifndef BOARD
+	BOARD = M5STAMP_ESP32P4
+endif
+
+#
+#  システム名，チップ名，コア名，開発環境名の定義
+#
+SYS  = m5stamp_esp32p4_kit
+CHIP = esp32p4
+CORE = riscv
+TOOL = gcc
+
+#
+#  コンパイルオプション
+#
+INCLUDES := $(INCLUDES) -I$(TARGETDIR)
+COPTS := $(COPTS)
+LDFLAGS := $(LDFLAGS)
+#  BSS/データの初期化はリンカスクリプト/起動コード側の方針に合わせて調整する。
+#  (ESP-IDF ブートローダがロード時に .data 配置・.bss クリアを行うか、FMP3 の
+#   start.S 側で行うかで切り替える。初手は start.S 側に任せるため未定義のまま)
+CDEFS := $(CDEFS)
+OBJ_LDFLAGS := $(OBJ_LDFLAGS) -Wl,--gc-sections
+#  --gc-sections で MP 初期化テーブル(_kernel_mpfinib_table)が除去されると
+#  cfg pass3(check)が symbol を見つけられないため、リンク時に保持する。
+LDFLAGS := $(LDFLAGS) -Wl,--undefined=_kernel_mpfinib_table
+
+#
+#  ターゲットボード毎の定義
+#
+CDEFS := $(CDEFS) -D$(BOARD)
+
+#
+#  リンカスクリプト
+#    ESP-IDF アプリイメージ形式に合わせたリンカスクリプトを使用する。
+#    (TODO: idf_image_integration の結論に基づき esp32p4_fmp.ld を作成)
+#
+LDSCRIPT = $(TARGETDIR)/esp32p4_fmp.ld
+
+#
+#  カーネルに関する定義
+#
+KERNEL_DIRS := $(KERNEL_DIRS) $(TARGETDIR)
+KERNEL_COBJS := $(KERNEL_COBJS) target_kernel_impl.o
+KERNEL_ASMOBJS := $(KERNEL_ASMOBJS)
+
+#
+#  実機実行・デバッグ支援ターゲット（esptool / OpenOCD / GDB, M5Stamp ESP32P4）
+#
+#  別端末で使い分ける:
+#    make flash    : ESP-IDF ローダイメージを実機フラッシュへ書き込む
+#    make console  : 内蔵 USB-CDC シリアルでカーネル出力を見る
+#    make openocd  : OpenOCD を前面起動（gdb サーバ :3333．Ctrl-C で終了）
+#    make jtaggdb  : gdb.ini で riscv32-esp-elf-gdb を起動しソースデバッグ
+#                    （OpenOCD をパイプで内包するので openocd の常駐は不要）
+#
+#  ★★最重要（誤書込み事故の防止）★★
+#    ESP32-P4 は内蔵 USB-Serial/JTAG が /dev/ttyACM* として見えるが，
+#    **列挙順は接続状況で変動する**（実際に ttyACM 番号が入れ替わる事例あり）．
+#    複数ボードを繋いだ環境で ttyACM 番号を直接指定してはならない．本 Makefile は
+#    **USB シリアル番号（= MAC）** で対象ボードを同定する:
+#        make flash SERIAL=30:ed:a0:ea:98:0e
+#    SERIAL 未指定時は Espressif 製（VID 303a）デバイスが 1 台だけならそれを使い，
+#    複数あれば候補を列挙して**中断する**（黙って別ボードへ書き込まないため）．
+#    PORT を明示すれば同定処理を丸ごとスキップする（例: make console PORT=/dev/ttyACM3）．
+#
+#  ★方式(a) の前提
+#    実機で走るイメージは FMP3 単体ではなく，FMP3(libfmp3.a) を ESP-IDF アプリへ
+#    静的リンクした $(LOADER_DIR) の成果物である．flash / jtaggdb はこの成果物を
+#    対象とするため，事前に $(LOADER_DIR) で idf.py build を済ませておくこと．
+#    （ESP-IDF 環境が有効なこと＝ . $$IDF_PATH/export.sh 済みであること）
+#
+#  上書き可能な変数: SERIAL, PORT, BAUD（既定 115200）, FLASH_BAUD（既定 460800）,
+#                    LOADER_DIR, LOADER_ELF, OPENOCD, OCD_CFG, GDBINI.
+#
+OPENOCD      ?= openocd
+OCD_CFG      ?= board/esp32p4-builtin.cfg
+LOADER_DIR   ?= $(TARGETDIR)/tools/fmp_loader
+LOADER_BUILD ?= $(LOADER_DIR)/build
+LOADER_ELF   ?= $(LOADER_BUILD)/fmp_loader.elf
+GDBINI       ?= $(TARGETDIR)/gdb.ini
+OCD_LOG      ?= openocd.log
+ESPTOOL      ?= python -m esptool
+SERIAL       ?=
+PORT         ?=
+BAUD         ?= 115200
+FLASH_BAUD   ?= 460800
+
+#  対象ボードの /dev/ttyACM* を USB シリアル番号(=MAC)で同定するシェル片．
+#  結果は $$dev に入る．複数候補かつ SERIAL 未指定なら列挙して exit 1．
+define TOPPERS_FIND_PORT
+dev="$(PORT)"; ser="$(SERIAL)"; \
+if [ -z "$$dev" ]; then \
+  cands=""; n=0; \
+  for d in /dev/ttyACM*; do \
+    [ -e "$$d" ] || continue; \
+    v=$$(udevadm info -q property -n "$$d" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p'); \
+    s=$$(udevadm info -q property -n "$$d" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p'); \
+    [ "$$v" = "303a" ] || continue; \
+    if [ -n "$$ser" ]; then \
+      [ "$$(echo $$s | tr A-Z a-z)" = "$$(echo $$ser | tr A-Z a-z)" ] && { dev="$$d"; break; }; \
+    else \
+      cands="$$cands  $$d (SERIAL=$$s)\n"; n=$$(($$n+1)); dev="$$d"; \
+    fi; \
+  done; \
+  if [ -n "$$ser" ] && [ -z "$$dev" ]; then \
+    echo "[error] SERIAL=$$ser のボードが見つかりません．接続と MAC を確認すること．" >&2; exit 1; \
+  fi; \
+  if [ -z "$$ser" ] && [ $$n -gt 1 ]; then \
+    echo "[error] Espressif デバイスが複数あります．SERIAL= で対象を指定してください:" >&2; \
+    printf "$$cands" >&2; exit 1; \
+  fi; \
+  [ -n "$$dev" ] || { echo "[error] Espressif デバイス(/dev/ttyACM*, VID 303a)が見つかりません．" >&2; exit 1; }; \
+fi
+endef
+
+.PHONY: flash console openocd jtaggdb
+
+#  ESP-IDF ローダイメージを書き込む（bootloader / partition-table / アプリの 3 点）．
+#    書込みアドレスは IDF ビルドが生成する build/flash_args に従う．
+flash:
+	@[ -f $(LOADER_BUILD)/flash_args ] || { \
+	  echo "[error] $(LOADER_BUILD)/flash_args がありません．先に $(LOADER_DIR) で idf.py build を実行してください．" >&2; exit 1; }
+	@$(TOPPERS_FIND_PORT); \
+	echo "[flash] $$dev へ書き込みます（$(FLASH_BAUD) bps）"; \
+	cd $(LOADER_BUILD) && $(ESPTOOL) --chip esp32p4 --port "$$dev" --baud $(FLASH_BAUD) \
+	  --before default_reset --after hard_reset write_flash @flash_args
+
+#  カーネル出力（内蔵 USB-CDC シリアル）を開く．
+console:
+	@$(TOPPERS_FIND_PORT); \
+	echo "[console] $$dev @ $(BAUD) 8N1"; \
+	if command -v picocom >/dev/null 2>&1; then \
+	  echo "[console] picocom -b $(BAUD) $$dev (exit: Ctrl-A Ctrl-X)"; picocom -b $(BAUD) "$$dev"; \
+	elif command -v cu >/dev/null 2>&1; then \
+	  echo "[console] cu -l $$dev -s $(BAUD) (exit: ~.)"; cu -l "$$dev" -s $(BAUD); \
+	else \
+	  echo "picocom か cu をインストールしてください（例: sudo apt-get install -y picocom）"; exit 1; \
+	fi
+
+#  OpenOCD を前面起動（gdb サーバ :3333）．別端末から gdb で接続する用途．
+#    ★PATH 上の openocd が ESP-IDF 同梱の openocd-esp32 であること．
+#      upstream OpenOCD は board/esp32p4-builtin.cfg を持たず ESP32-P4 非対応．
+#      （. $$IDF_PATH/export.sh を先に実行すれば同梱版が PATH 先頭に来る）
+openocd:
+	@$(TOPPERS_FIND_PORT); \
+	ser=$$(udevadm info -q property -n "$$dev" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p'); \
+	echo "[openocd] $$dev (serial=$$ser) に接続します"; \
+	$(OPENOCD) -c "adapter serial $$ser" -f $(OCD_CFG)
+
+#  gdb.ini でソースデバッグ．OpenOCD をパイプ(gdb_port pipe)で内包するため
+#  サーバの常駐は不要．対象ボードは serial で固定する．
+jtaggdb:
+	@[ -f $(LOADER_ELF) ] || { \
+	  echo "[error] $(LOADER_ELF) がありません．先に $(LOADER_DIR) で idf.py build を実行してください．" >&2; exit 1; }
+	@$(TOPPERS_FIND_PORT); \
+	ser=$$(udevadm info -q property -n "$$dev" 2>/dev/null | sed -n 's/^ID_SERIAL_SHORT=//p'); \
+	echo "[jtaggdb] $$dev (serial=$$ser) / $(LOADER_ELF)"; \
+	$(GCC_TARGET_PREFIX)gdb \
+	  -ex "target extended-remote | $(OPENOCD) -c \"gdb_port pipe; log_output $(OCD_LOG)\" -c \"adapter serial $$ser\" -f $(OCD_CFG)" \
+	  -x $(GDBINI) $(LOADER_ELF)
+
+#
+#  チップ依存部
+#
+include $(SRCDIR)/arch/$(CORE)_$(TOOL)/$(CHIP)/Makefile.chip
