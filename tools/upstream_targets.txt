@@ -15,3 +15,5 @@ polarfire_soc_kit_gcc
 kria_arm64_gcc
 # Kria Cortex-R5 (QEMU)
 kria_r5_gcc
+# M5Stamp ESP32-P4 (RISC-V, 実機)
+m5stamp_esp32p4_gcc
