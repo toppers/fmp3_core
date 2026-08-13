@@ -7,5 +7,7 @@
 #   - 実体差分は polarfire_soc_kit ターゲット（*.h / run_test.sh 等）と
 #     arch/riscv_gcc/common/core_sil.h（mstatus MIE 操作の inline asm に
 #     "memory" clobber を追加）、test/ ・ utils/gdb_os_aware/（上流の新ツール）。
-# 取り込んだ target は tools/upstream_targets.txt を参照（5 個のみ）
+# 取り込んだ target は tools/upstream_targets.txt を参照（6 個のみ）
+#   - 2026-08-13: 同一 SHA のまま allowlist を広げて m5stamp_esp32p4_gcc を追加
+#     取り込み（ESP32-P4 統合 Phase 0）。pin は 882bbe42 のまま不変。
 882bbe42bfbba18bd22690cc1b4ee82a4612ad2e

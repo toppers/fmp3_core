@@ -1,0 +1,69 @@
+# -*- coding: utf-8 -*-
+#
+#		ターゲット依存のクラス定義（Plarfire SoC Kit用）
+#
+#  $Id: target_class.trb 1056 2023-01-04 13:48:16Z ertl-hiro $
+#
+
+#
+#  クラスのリスト
+#
+$globalVars.push("clsData")
+
+case $TNUM_PRCID
+when 1
+  $clsData = {
+    1 => { clsid: NumStr.new(1, "CLS_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1 ] },
+    2 => { clsid: NumStr.new(2, "CLS_ALL_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1 ] },
+  }
+
+when 2
+  $clsData = {
+    1 => { clsid: NumStr.new(1, "CLS_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1 ] },
+    2 => { clsid: NumStr.new(2, "CLS_PRC2"),
+           initPrc: 2, affinityPrcList: [ 2 ] },
+    3 => { clsid: NumStr.new(3, "CLS_ALL_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1,2 ] },
+    4 => { clsid: NumStr.new(4, "CLS_ALL_PRC2"),
+           initPrc: 2, affinityPrcList: [ 1,2 ] },
+  }
+
+when 3
+  $clsData = {
+    1 => { clsid: NumStr.new(1, "CLS_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1 ] },
+    2 => { clsid: NumStr.new(2, "CLS_PRC2"),
+           initPrc: 2, affinityPrcList: [ 2 ] },
+    3 => { clsid: NumStr.new(3, "CLS_PRC3"),
+           initPrc: 3, affinityPrcList: [ 3 ] },
+    4 => { clsid: NumStr.new(4, "CLS_ALL_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1,2,3 ] },
+    5 => { clsid: NumStr.new(5, "CLS_ALL_PRC2"),
+           initPrc: 2, affinityPrcList: [ 1,2,3 ] },
+    6 => { clsid: NumStr.new(6, "CLS_ALL_PRC3"),
+           initPrc: 3, affinityPrcList: [ 1,2,3 ] },
+  }
+
+when 4
+  $clsData = {
+    1 => { clsid: NumStr.new(1, "CLS_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1 ] },
+    2 => { clsid: NumStr.new(2, "CLS_PRC2"),
+           initPrc: 2, affinityPrcList: [ 2 ] },
+    3 => { clsid: NumStr.new(3, "CLS_PRC3"),
+           initPrc: 3, affinityPrcList: [ 3 ] },
+    4 => { clsid: NumStr.new(4, "CLS_PRC4"),
+           initPrc: 4, affinityPrcList: [ 4 ] },
+    5 => { clsid: NumStr.new(5, "CLS_ALL_PRC1"),
+           initPrc: 1, affinityPrcList: [ 1,2,3,4 ] },
+    6 => { clsid: NumStr.new(6, "CLS_ALL_PRC2"),
+           initPrc: 2, affinityPrcList: [ 1,2,3,4 ] },
+    7 => { clsid: NumStr.new(7, "CLS_ALL_PRC3"),
+           initPrc: 3, affinityPrcList: [ 1,2,3,4 ] },
+    8 => { clsid: NumStr.new(8, "CLS_ALL_PRC4"),
+           initPrc: 4, affinityPrcList: [ 1,2,3,4 ] },
+  }
+end

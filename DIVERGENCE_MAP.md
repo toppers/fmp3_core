@@ -7,7 +7,7 @@ pristine を改変したら必ずここに記録する（マージ衝突解決�
 |------|------|-----------|----------|
 | cfg/ | none | **無改変**（`git diff upstream main -- cfg` は空）。AGENTS.md §2 規則3（cfg 相当は `cfg_py/` で提供し CMake から呼ぶ、pristine の `cfg/` は使わない）を**文言・精神の両方で満たす**（2026-07-19、計画B Task 11 の cutover 完了により確定。下記「解消済み事項」参照）。`CMakeLists.txt` が呼ぶのは常に `cfg_py/cfg.py` であり，`cfg/cfg.rb` はコメント（`CMakeLists.txt:158-163`）にのみ現れる。`cfg/` は CMake のビルドグラフからは**完全に不使用**だが，`tools/cfg_equivalence.sh`（CMake 外）が差分等価性検査のオラクルとして引き続き呼ぶため，ファイル自体は削除しない。次の `git merge upstream` で `cfg/` に衝突が出た場合も，pristine 側の変更を素直に取り込んでよい（我々の改変は無い＝none） | - |
 | target/ | remove | 使わない target を取り込まない（imx8mm_evk_arm64_gcc / raspberrypi_pico_gcc / stm32mp257f_dk_arm64_gcc / zcu102_arm64_gcc / zybo_gcc / zybo_z7_gcc）。allowlist は `tools/upstream_targets.txt`。復活させたい場合は 1 行足して `import_upstream.sh` 再実行 → `git merge upstream` | - |
-| target/m5stamp_esp32p4_gcc | remove | ESP32-P4 のターゲット依存部は本リポジトリでは管理しない。`fmp3_esp_idf`（別リポジトリ、`/home/honda/TOPPERS/ESP32/fmp3_esp_idf`）が chip 依存部・ターゲット依存部の両方を管理する方針にユーザが決定したため（2026-07-19）。上記6個（使わないから外す）とは除外理由が異なる点に注意。`arch/riscv_gcc/esp32p4`（chip 依存部）は上流追従の差分を見られる利点を保つため pristine のまま残す＝除外対象外。復活させたい場合は `tools/upstream_targets.txt` に 1 行足して `import_upstream.sh` 再実行 → `git merge upstream` | - |
+| target/m5stamp_esp32p4_gcc | none | **無改変で取り込み済み**（2026-08-13、ESP32-P4 統合 Phase 0）。2026-07-19 の「本リポジトリでは管理しない」という決定（下記「解消済み事項」に旧記述を保存）を撤回し、`tools/upstream_targets.txt` に 1 行足して `import_upstream.sh` 再実行 → `git merge upstream` で取り込んだ。`arch/riscv_gcc/esp32p4`（chip 依存部）は元から allowlist の対象外＝取り込み済みだったので、これで P4 の chip 層・target 層が揃った。現時点で派生ファイル（`target.cmake` / `presets.json` / `*.py`）は無く、CMake ビルドは未対応（`FMP3_TARGET=m5stamp_esp32p4_gcc` は configure できない）。cfg テンプレートは pristine の `.trb` のみ | - |
 | arch/riscv_gcc/common/arch.cmake | add | Makefile.core の CMake 版。上流の Makefile は残すが CMake ビルドからは参照しない | - |
 | arch/riscv_gcc/polarfire_soc/chip.cmake | add | Makefile.chip の CMake 版。`-march` は上流の `rv64gc` ではなく `rv64imafdc`（ISA は同一。`rv64gc` は実在しない multilib ディレクトリ `rv64imafdc/lp64d` に解決され `crt0.o` が見つからないが、`rv64imafdc` は既定ディレクトリ `.` に解決される。ABI は `lp64d` のまま） | 未 |
 | target/polarfire_soc_kit_gcc/{target.cmake,presets.json} | add | Makefile.target の CMake 版。Microchip SDK のソース16個を最終リンクに加える。FMP3_LDSCRIPT_VIA_DRIVER_T=ON を宣言する（picolibc.specs の %{!T:-Tpicolibc.ld} が -Wl,-T, では防げないため。汎用層 CMakeLists.txt 側のトグルを読む形に改めた＝計画A2 Task 1） | - |
@@ -107,6 +107,25 @@ pristine を改変したら必ずここに記録する（マージ衝突解決�
   （常に `-O2` に戻される）ことになる。対処は本レビュー対応のスコープ外と判断し記録に留める。
 
 ## 解消済み事項
+
+- **（2026-08-13 解消）`target/m5stamp_esp32p4_gcc` を取り込まない、という 2026-07-19 の決定。**
+  旧記述（台帳の該当行にあったもの）はこうだった:
+  「ESP32-P4 のターゲット依存部は本リポジトリでは管理しない。`fmp3_esp_idf`（別リポジトリ）が
+  chip 依存部・ターゲット依存部の両方を管理する方針にユーザが決定したため（2026-07-19）。
+  `arch/riscv_gcc/esp32p4`（chip 依存部）は上流追従の差分を見られる利点を保つため
+  pristine のまま残す＝除外対象外。」
+  ESP32-P4 統合 Phase 0 の着手にあたり、この方針を撤回して取り込んだ。理由は、
+  chip 層（`arch/riscv_gcc/esp32p4`）だけを追従して target 層を別リポジトリに置くと、
+  上流が両者を同時に変えたときの整合を機械で確かめられないため。取り込みは
+  `tools/upstream_targets.txt` に 1 行足して `import_upstream.sh` を再実行し
+  `git merge upstream`（AGENTS.md §2 規則6 の手順そのまま。衝突ゼロ、66 ファイル add のみ）。
+  取り込んだ内容は fmp3_archive `882bbe42`（= `polarfire_soc_kit_gcc-20260729`、main の
+  現 pin と同一）であり、TOPPERS svn `https://dev.toppers.jp/svn/fmp3/branches/3.4` の
+  r593 作業コピーと `diff -rq` でバイト一致することを実測した（svn 側にのみ
+  `E_PACKAGE`＝リリースパッケージ生成用の制御ファイルがあり、これは公開パッケージには
+  入らないので取り込まない）。
+  **未了**: CMake 層（`target.cmake` / `presets.json`）と cfg_py 層（`target_*.py`、
+  `arch/riscv_gcc/esp32p4/chip_kernel.py`）は未作成。これらは Phase 1 の作業。
 
 - **（2026-07-19 解消）`cfg_py/cfg.py`（計画Aの中身）が pristine の `cfg/cfg.rb` へ委譲する薄いシムであった件。**
   計画B（`docs/superpowers/plans/2026-07-19-fmp3-cmake-b-python-cfg.md`）で asp3_core 1.7.1 の

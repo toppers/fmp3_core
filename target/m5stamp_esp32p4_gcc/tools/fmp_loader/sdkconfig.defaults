@@ -1,0 +1,26 @@
+# FMP3 ローダ殻(方式a)向け IDF 設定
+#
+# 対象チップ．これを書いておくと sdkconfig が無い状態から idf.py を実行しても
+# 正しいターゲットで生成される（無いと既定の esp32 に落ちる）。sdkconfig 自体は
+# 本ファイルから自動生成される派生物なので，バージョン管理には含めない．
+CONFIG_IDF_TARGET="esp32p4"
+
+#   FMP3 が core0 を掌握し IDF のウォッチドッグを餌やりしないため，各種 WDT を無効化する．
+#   (有効だと HP_SYS_HP_WDT_RESET でリブートループになる)
+CONFIG_ESP_INT_WDT=n
+CONFIG_ESP_TASK_WDT_INIT=n
+CONFIG_BOOTLOADER_WDT_ENABLE=n
+
+# 単一コアで FMP3 を動かす最小構成(core1 は当面未使用)．ログは USB-Serial/JTAG．
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# FMP3 が core1 を掌握するため，IDF FreeRTOS は core0 のみ(UNICORE)にして
+# core1 を IDF に起動させない(FMP3 が toppers_start で起こす)．
+CONFIG_FREERTOS_UNICORE=y
+
+# 実機(M5Stamp ESP32P4)はチップリビジョン v1.3 の初期シリコン．
+# IDF v5.5.4 既定の最小リビジョンは v3.01(ESP32P4_REV_MIN_301)で v1.3 を弾く．
+# v3.0以上と<3.0はハード差が大きく排他(Kconfig.hw_support)のため，まず <3.0 系を
+# 明示選択し(ESP32P4_REV_MIN_100 等のゲート)，最小を v1.00 に下げて v1.x で flash する．
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
