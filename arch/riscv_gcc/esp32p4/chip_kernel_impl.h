@@ -139,8 +139,26 @@ get_my_clic_cidx(void)
 /* 外部表現への変換 */
 #define EXT_IPM(pri)  (-(PRI)((pri) >> 5))
 
-/* 内部表現への変換 */
-#define INT_IPM(ipm)  (((uint_t)(-(ipm))) << 5)
+/*
+ *  内部表現への変換
+ *
+ *  下位5ビットの「1詰め」が要る．CLIC の線側の優先度バイト CLIC_INT_CTRL[31:24]
+ *  は NLBITS=3 のため下位5ビットが WARL でハード強制1になる(実測: 0x20 を書くと
+ *  0x3f が読める)のに対し，閾値レジスタ CLIC_INT_THRESH[31:24] は書いた値を
+ *  そのまま保持する(実測: 0x20 は 0x20 のまま)．**この2つは非対称である**．
+ *  よって同じ (-ipm)<<5 を両方へ書くと，レベルLの線(実効 (L<<5)|0x1F)と
+ *  レベルLの閾値((L<<5))を比べたときに線の方が 0x1F だけ大きくなり，
+ *  「閾値と同じレベルの割込みだけがマスクされない」(chg_ipm(-1)がレベル1の
+ *  割込みを止められない)という off-by-one になる．ESP-IDF も閾値バイトを
+ *  下位5ビット1詰めで符号化している
+ *  (components/riscv/include/esp_private/interrupt_clic.h:76-83
+ *   NLBITS_TO_BYTE(level) = ((level)<<NLBITS_SHIFT) | ((1<<NLBITS_SHIFT)-1))．
+ *  ESP32-P4実機(M5Stamp・rev v1.3)で 9 通りのレベル/閾値の組合せを直接測って
+ *  確認済み．線側へ書く値は下位5ビットをハードが立てるので**この修正で不変**
+ *  である(実測: 2026-08-15/16・ESP-IDF v5.5.4 の interrupt_clic.h:76-83 の
+ *  NLBITS_TO_BYTE と同じ符号化)．
+ */
+#define INT_IPM(ipm)  ((((uint_t)(-(ipm))) << 5) | 0x1FU)
 
 /*
  *  割込み番号の範囲の判定

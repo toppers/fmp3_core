@@ -197,6 +197,19 @@ ALABEL(irc_end_int_2)
 
 /*
  *  CPU例外発生前の割込み優先度の取得（外部表現で返す）
+ *
+ *  内部表現は CLIC_INT_THRESH[31:24] の 8bit 値であり，レベルは上位3ビット
+ *  [7:5] に在る（NLBITS=3）．よって外部表現へ戻すには **バイトを取り出した後に
+ *  さらに >>5 が要る**（chip_kernel_impl.h の EXT_IPM(pri) = -(pri>>5) と同じ）．
+ *  この srli を欠くと，例えば IPM=-1（内部表現 0x3f）のとき -63 を返す．
+ *  PLIC 版（polarfire_soc）は EXT_IPM(pri) = -pri でシフトが無いので，そこから
+ *  持ってきた形になっていた（推測）．
+ *  実害: T_EXCINF.intpri を通じて exc_get_intpri()/xsns_dpn() が壊れる．
+ *  とくに INT_IPM が下位5ビットを1詰めするようになった後は，割込み優先度マスク
+ *  全解除（TIPM_ENAALL）でも内部表現が 0x1f になるため，シフト無しでは -31 を返し
+ *  **exc_sense_intmask() が「全解除」を認識できなくなる**（実機で -31 を実測．
+ *  2026-08-16・ESP32-P4 M5Stamp rev v1.3）．INT_IPM の修正と本修正は**セットで
+ *  入れること**（片方だけでは上記のとおり別の壊れ方をする）．
  */
     ATEXT
     AALIGN(4)
@@ -204,7 +217,8 @@ ALABEL(irc_end_int_2)
 ALABEL(irc_get_intpri)
     li      t0, CLIC_THRESH_ADDR
     lw      a1, 0(t0)
-    srli    a1, a1, 24
+    srli    a1, a1, 24               /* 内部表現(CTLバイト)を取り出す */
+    srli    a1, a1, 5                /* レベル(上位3ビット)を右詰めする */
     neg     a0, a1                   /* 外部表現に変換 */
     jr      ra
 
