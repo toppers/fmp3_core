@@ -286,6 +286,19 @@ if not OMIT_ISTACK and not OMIT_ISTK:
                 error_wrong("E_PAR", params, "istk", "null")
 
 #
+#  カーネルメモリプール領域に関するチェック
+#
+if len(cfgData["DEF_MPK"]) > 0:
+    params0 = cfgData["DEF_MPK"][1]
+    mpk = PEEK(SYMBOL("_kernel_mpk"), sizeof_void_ptr)
+
+    # mpkがターゲット定義の制約に合致しない場合（E_PAR）
+    if (mpk & (CHECK_MPK_ALIGN - 1)) != 0:
+        error_wrong("E_PAR", params0, "mpk", "not aligned")
+    if CHECK_MPK_NONNULL and mpk == 0:
+        error_wrong("E_PAR", params0, "mpk", "null")
+
+#
 #  初期化ルーチンに関するチェック
 #
 for prcid in range(0, TNUM_PRCID + 1):

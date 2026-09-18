@@ -16,3 +16,15 @@ DEF_EXC .excno* { .excatr &exchdr }
 DEF_ICS { .istksz &istk? }
 ATT_INI { .iniatr &exinf &inirtn }
 ATT_TER { .teratr &exinf &terrtn }
+AID_TSK .notsk
+DEF_MPK { .mpksz &mpk? }
+AID_CYC .nocyc
+AID_ALM .noalm
+AID_SEM .nosem
+AID_FLG .noflg
+AID_MTX .nomtx
+AID_DTQ .nodtq
+AID_PDQ .nopdq
+AID_MPF .nompf
+AID_ISR .noisr
+ENA_DYNISR .intno*

@@ -91,6 +91,16 @@ typedef struct dataqueue_control_block {
  *  データキューIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_dtqid;
+extern const ID	tmax_sdtqid;		/* 静的生成データキューのID番号の最大値 */
+
+/*
+ *  使用していないデータキュー管理ブロックのリスト（dataqueue.c）
+ *
+ *  DTQCBの先頭フィールドがQUEUE（swait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre dataqueue.c:183-189 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_dtqcb;
 
 /*
  *  データキュー初期化ブロックのエリア（kernel_cfg.c）
@@ -98,15 +108,39 @@ extern const ID	tmax_dtqid;
 extern const DTQINIB	dtqinib_table[];
 
 /*
+ *  動的生成データキューの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern DTQINIB	adtqinib_table[];
+
+/*
  *  データキュー管理ブロックのエリアへのポインタテーブル（kernel_cfg.c）
  */
 extern DTQCB *const	p_dtqcb_table[];
 
 /*
- *  データキュー管理ブロックからデータキューIDを取り出すためのマクロ
+ *  データキューの数
+ *
+ *  DTQIDマクロから参照するためdataqueue.cから移設した．
  */
-#define	DTQID(p_dtqcb)	((ID)(((p_dtqcb)->p_dtqinib - dtqinib_table) \
-															+ TMIN_DTQID))
+#define tnum_dtq	((uint_t)(tmax_dtqid - TMIN_DTQID + 1))
+#define tnum_sdtq	((uint_t)(tmax_sdtqid - TMIN_DTQID + 1))
+
+/*
+ *  データキュー管理ブロックからデータキューIDを取り出すためのマクロ
+ *
+ *  FMP3のDTQCBはポインタ表（p_dtqcb_table）経由で参照される個別の
+ *  named staticであり，DTQCB自身の配列位置から番号を引けない．元から
+ *  DTQINIBへのポインタ差分で求めていた式を，動的生成データキュー
+ *  （p_dtqinibがadtqinib_tableを指す）と静的生成データキュー
+ *  （p_dtqinibがdtqinib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCID・段階3aのSEMIDと同型）．AID_DTQが無い構成では
+ *  tnum_dtq == tnum_sdtqとなり第1項が常に偽＝従来と同一の式に落ちる．
+ */
+#define	DTQID(p_dtqcb) \
+	((((p_dtqcb)->p_dtqinib >= adtqinib_table) \
+		&& ((p_dtqcb)->p_dtqinib < &adtqinib_table[tnum_dtq - tnum_sdtq])) \
+	  ? ((ID)(((p_dtqcb)->p_dtqinib - adtqinib_table) + TMIN_DTQID + tnum_sdtq)) \
+	  : ((ID)(((p_dtqcb)->p_dtqinib - dtqinib_table) + TMIN_DTQID)))
 
 /*
  *  データキュー機能の初期化

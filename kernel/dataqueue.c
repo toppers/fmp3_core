@@ -126,11 +126,6 @@
 #endif /* LOG_REF_DTQ_LEAVE */
 
 /*
- *  データキューの数
- */
-#define tnum_dtq	((uint_t)(tmax_dtqid - TMIN_DTQID + 1))
-
-/*
  *  データキューIDからデータキュー管理ブロックを取り出すためのマクロ
  */
 #define INDEX_DTQ(dtqid)	((uint_t)((dtqid) - TMIN_DTQID))
@@ -141,14 +136,25 @@
  */
 #ifdef TOPPERS_dtqini
 
+/*
+ *  使用していないデータキュー管理ブロックのリスト
+ *
+ *  DTQCBの先頭フィールドがQUEUE（swait_queue）なので，そのまま
+ *  free-listのリンクに流用する．acre_dtqは取り出した直後に
+ *  queue_initializeで作り直すため，TA_TPRI（優先度順待ちキュー）と
+ *  干渉しない．
+ */
+QUEUE	free_dtqcb;
+
 void
 initialize_dataqueue(PCB *p_my_pcb)
 {
-	uint_t	i;
+	uint_t	i, j;
 	DTQCB	*p_dtqcb;
+	DTQINIB	*p_dtqinib;
 
 	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
-		for (i = 0; i < tnum_dtq; i++) {
+		for (i = 0; i < tnum_sdtq; i++) {
 			p_dtqcb = p_dtqcb_table[i];
 			queue_initialize(&(p_dtqcb->swait_queue));
 			p_dtqcb->p_dtqinib = &(dtqinib_table[i]);
@@ -156,6 +162,25 @@ initialize_dataqueue(PCB *p_my_pcb)
 			p_dtqcb->count = 0U;
 			p_dtqcb->head = 0U;
 			p_dtqcb->tail = 0U;
+		}
+
+		/*
+		 *  動的生成用スロットの初期化
+		 *
+		 *  データキューはプロセッサ親和を持たない（DTQINIBに
+		 *  iprcid/affinityが無く，DTQCBにp_pcbが無い）ため，段階2の
+		 *  cyc/almのようなプロセッサ判定や充填は一切不要である．本関数は
+		 *  元からマスタプロセッサ限定なので，そのブロックの中で続けて
+		 *  初期化する．他プロセッサへの可視性は，本関数の呼出し後の
+		 *  barrier_syncが保証する（段階1のfree_tcbと同じ論証）．
+		 */
+		queue_initialize(&free_dtqcb);
+		for (j = 0; i < tnum_dtq; i++, j++) {
+			p_dtqcb = p_dtqcb_table[i];
+			p_dtqinib = &(adtqinib_table[j]);
+			p_dtqinib->dtqatr = TA_NOEXS;
+			p_dtqcb->p_dtqinib = ((const DTQINIB *) p_dtqinib);
+			queue_insert_prev(&free_dtqcb, &(p_dtqcb->swait_queue));
 		}
 	}
 }
@@ -305,6 +330,188 @@ receive_data(PCB *p_my_pcb, DTQCB *p_dtqcb, intptr_t *p_data)
 #endif /* TOPPERS_dtqrcv */
 
 /*
+ *  データキューの生成
+ */
+#ifdef TOPPERS_acre_dtq
+
+#ifndef LOG_ACRE_DTQ_ENTER
+#define LOG_ACRE_DTQ_ENTER(pk_cdtq)
+#endif /* LOG_ACRE_DTQ_ENTER */
+
+#ifndef LOG_ACRE_DTQ_LEAVE
+#define LOG_ACRE_DTQ_LEAVE(ercd)
+#endif /* LOG_ACRE_DTQ_LEAVE */
+
+ER_ID
+acre_dtq(const T_CDTQ *pk_cdtq)
+{
+	DTQCB	*p_dtqcb;
+	DTQINIB	*p_dtqinib;
+	ATR		dtqatr;
+	uint_t	dtqcnt;
+	DTQMB	*p_dtqmb;
+	ER		ercd;
+
+	LOG_ACRE_DTQ_ENTER(pk_cdtq);
+	CHECK_TSKCTX_UNL();
+
+	dtqatr = pk_cdtq->dtqatr;
+	dtqcnt = pk_cdtq->dtqcnt;
+	p_dtqmb = pk_cdtq->dtqmb;
+
+	CHECK_VALIDATR(dtqatr, TA_TPRI);
+
+	/*
+	 *  管理領域のサイズ計算があふれないこと
+	 *
+	 *  ★dcre（extension/dcre/kernel/dataqueue.c）にこの検査は無い．
+	 *  dtqcntはuint_t（unsigned int），sizeof(DTQMB)はsize_tである．
+	 *  size_tとunsigned intが同幅のターゲット（32bit）では，両者の積が
+	 *  size_tの中であふれ，要求よりはるかに小さい領域の確保に成功して
+	 *  しまう（その領域にdtqcnt個のDTQMBは入らない）．enqueue_dataは
+	 *  p_dtqinib->dtqcntを信じてp_dtqmb[tail]へ書くので，プール外破壊に
+	 *  なる．64bitターゲットではuint_tの最大値でも積があふれないため，
+	 *  この検査は恒真に落ちる（無害）．
+	 *
+	 *  検査はロック取得前に置く．引数だけから決まりコア非依存である
+	 *  （既存のCHECK_VALIDATR/MB_ALIGNと同じ位置づけ）．
+	 */
+	CHECK_PAR(dtqcnt <= (SIZE_MAX / sizeof(DTQMB)));
+
+	if (p_dtqmb != NULL) {
+		CHECK_PAR(MB_ALIGN(p_dtqmb));
+	}
+
+	lock_cpu();
+	acquire_glock();
+	if (tnum_dtq == tnum_sdtq || queue_empty(&free_dtqcb)) {
+		ercd = E_NOID;
+	}
+	else {
+		/*
+		 *  管理領域の確保
+		 *
+		 *  dtqcntが0のデータキューは管理領域を必要としない（データを
+		 *  1個も保持できず，送信は必ず受信待ちタスクへ直接渡すか待ちに
+		 *  なる）．ユーザがdtqmbを与えた場合はそれを使い，TA_MBALLOCを
+		 *  立てない（del_dtqがfree_mpkしてはならないため）．
+		 *
+		 *  ★E_NOMEMのときfree-listからCBを取り出していないことが重要
+		 *  である（確保に成功してから初めてqueue_delete_nextする）．
+		 *  段階1のacre_tskと同じ順序．
+		 */
+		if (dtqcnt != 0 && p_dtqmb == NULL) {
+			p_dtqmb = malloc_mpk(sizeof(DTQMB) * dtqcnt);
+			dtqatr |= TA_MBALLOC;
+		}
+		if (dtqcnt != 0 && p_dtqmb == NULL) {
+			ercd = E_NOMEM;
+		}
+		else {
+			p_dtqcb = ((DTQCB *) queue_delete_next(&free_dtqcb));
+			p_dtqinib = (DTQINIB *)(p_dtqcb->p_dtqinib);
+			p_dtqinib->dtqatr = dtqatr;
+			p_dtqinib->dtqcnt = dtqcnt;
+			p_dtqinib->p_dtqmb = p_dtqmb;
+
+			queue_initialize(&(p_dtqcb->swait_queue));
+			queue_initialize(&(p_dtqcb->rwait_queue));
+			p_dtqcb->count = 0U;
+			p_dtqcb->head = 0U;
+			p_dtqcb->tail = 0U;
+			ercd = DTQID(p_dtqcb);
+		}
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_DTQ_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_dtq */
+
+/*
+ *  データキューの削除
+ */
+#ifdef TOPPERS_del_dtq
+
+#ifndef LOG_DEL_DTQ_ENTER
+#define LOG_DEL_DTQ_ENTER(dtqid)
+#endif /* LOG_DEL_DTQ_ENTER */
+
+#ifndef LOG_DEL_DTQ_LEAVE
+#define LOG_DEL_DTQ_LEAVE(ercd)
+#endif /* LOG_DEL_DTQ_LEAVE */
+
+ER
+del_dtq(ID dtqid)
+{
+	DTQCB	*p_dtqcb;
+	DTQINIB	*p_dtqinib;
+	ER		ercd;
+	TCB		*p_selftsk;
+	PCB		*p_my_pcb;
+
+	LOG_DEL_DTQ_ENTER(dtqid);
+	CHECK_TSKCTX_UNL_MYSTATE(&p_selftsk);
+	CHECK_ID(VALID_DTQID(dtqid));
+	p_dtqcb = get_dtqcb(dtqid);
+
+	lock_cpu();
+	acquire_glock();
+	p_my_pcb = get_my_pcb();
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (dtqid <= tmax_sdtqid) {
+		ercd = E_OBJ;
+	}
+	else {
+		/*
+		 *  待ちタスクがいても削除は成功し，送信待ち・受信待ちの両方の
+		 *  タスクがE_DLTで強制解除される．init_wait_queueはMP対応済み
+		 *  （wait.c:215-228）で，既存のini_dtqと同一の機構である．
+		 *  新規の解除機構は書かない．管理領域に滞留していたデータは
+		 *  破棄される（countをクリアせずCBごとfree-listへ戻すが，
+		 *  acre_dtqが取り出し時にcount/head/tailを0に初期化する）．
+		 */
+		init_wait_queue(p_my_pcb, &(p_dtqcb->swait_queue));
+		init_wait_queue(p_my_pcb, &(p_dtqcb->rwait_queue));
+		p_dtqinib = (DTQINIB *)(p_dtqcb->p_dtqinib);
+		/*
+		 *  ★順序制約：属性の読みはTA_NOEXSの書込みより前で行う．
+		 *  TA_NOEXSは((ATR)(-1))＝全ビットが1であるため，
+		 *  TA_NOEXSを書いた後では(dtqatr & TA_MBALLOC) != 0Uが
+		 *  必ず真になり，ユーザ供給の管理領域まで解放してしまう
+		 *  （プールの破壊）．dcre dataqueue.c:427-430 も同じ順序．
+		 */
+		if ((p_dtqinib->dtqatr & TA_MBALLOC) != 0U) {
+			free_mpk(p_dtqinib->p_dtqmb);
+		}
+		p_dtqinib->dtqatr = TA_NOEXS;
+		queue_insert_prev(&free_dtqcb, &(p_dtqcb->swait_queue));
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
+	release_glock();
+  unlock_and_exit:
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_DTQ_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_dtq */
+
+/*
  *  データキューへの送信
  */
 #ifdef TOPPERS_snd_dtq
@@ -326,7 +533,10 @@ snd_dtq(ID dtqid, intptr_t data)
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
 	p_selftsk = p_my_pcb->p_runtsk;
-	if (p_selftsk->raster) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (send_data(p_my_pcb, p_dtqcb, data)) {
@@ -380,7 +590,10 @@ psnd_dtq(ID dtqid, intptr_t data)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (send_data(p_my_pcb, p_dtqcb, data)) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (send_data(p_my_pcb, p_dtqcb, data)) {
 		if (p_selftsk != p_my_pcb->p_schedtsk) {
 			if (!context) {
 				release_glock();
@@ -430,7 +643,10 @@ tsnd_dtq(ID dtqid, intptr_t data, TMO tmout)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (send_data(p_my_pcb, p_dtqcb, data)) {
@@ -483,24 +699,37 @@ fsnd_dtq(ID dtqid, intptr_t data)
 	CHECK_UNL_MYSTATE(&p_selftsk, &context);
 	CHECK_ID(VALID_DTQID(dtqid));
 	p_dtqcb = get_dtqcb(dtqid);
-	CHECK_ILUSE(p_dtqcb->p_dtqinib->dtqcnt > 0U);
 
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	force_send_data(p_my_pcb, p_dtqcb, data);
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		if (!context) {
-			release_glock();
-			dispatch();
-			ercd = E_OK;
-			goto unlock_and_exit;
-		}
-		else {
-			request_dispatch_retint();
-		}
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else if (!(p_dtqcb->p_dtqinib->dtqcnt > 0U)) {
+		/*
+		 *  ★dcreに倣い，dtqcntの検査をロック取得前のCHECK_ILUSEから
+		 *  ロック内のこの位置へ移した（dcre dataqueue.c:604-606）．
+		 *  E_NOEXSゲートより前にp_dtqinibを読むと，削除済み
+		 *  （TA_NOEXS）スロットの残留dtqcntを読むことになるため．
+		 */
+		ercd = E_ILUSE;
+	}
+	else {
+		force_send_data(p_my_pcb, p_dtqcb, data);
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			if (!context) {
+				release_glock();
+				dispatch();
+				ercd = E_OK;
+				goto unlock_and_exit;
+			}
+			else {
+				request_dispatch_retint();
+			}
+		}
+		ercd = E_OK;
+	}
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -533,7 +762,10 @@ rcv_dtq(ID dtqid, intptr_t *p_data)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (receive_data(p_my_pcb, p_dtqcb, p_data)) {
@@ -590,7 +822,10 @@ prcv_dtq(ID dtqid, intptr_t *p_data)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (receive_data(p_my_pcb, p_dtqcb, p_data)) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (receive_data(p_my_pcb, p_dtqcb, p_data)) {
 		if (p_selftsk != p_my_pcb->p_schedtsk) {
 			release_glock();
 			dispatch();
@@ -635,7 +870,10 @@ trcv_dtq(ID dtqid, intptr_t *p_data, TMO tmout)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (receive_data(p_my_pcb, p_dtqcb, p_data)) {
@@ -695,18 +933,23 @@ ini_dtq(ID dtqid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	init_wait_queue(p_my_pcb, &(p_dtqcb->swait_queue));
-	init_wait_queue(p_my_pcb, &(p_dtqcb->rwait_queue));
-	p_dtqcb->count = 0U;
-	p_dtqcb->head = 0U;
-	p_dtqcb->tail = 0U;
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		release_glock();
-		dispatch();
-		ercd = E_OK;
-		goto unlock_and_exit;
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else {
+		init_wait_queue(p_my_pcb, &(p_dtqcb->swait_queue));
+		init_wait_queue(p_my_pcb, &(p_dtqcb->rwait_queue));
+		p_dtqcb->count = 0U;
+		p_dtqcb->head = 0U;
+		p_dtqcb->tail = 0U;
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -736,10 +979,15 @@ ref_dtq(ID dtqid, T_RDTQ *pk_rdtq)
 
 	lock_cpu();
 	acquire_glock();
-	pk_rdtq->stskid = wait_tskid(&(p_dtqcb->swait_queue));
-	pk_rdtq->rtskid = wait_tskid(&(p_dtqcb->rwait_queue));
-	pk_rdtq->sdtqcnt = p_dtqcb->count;
-	ercd = E_OK;
+	if (p_dtqcb->p_dtqinib->dtqatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		pk_rdtq->stskid = wait_tskid(&(p_dtqcb->swait_queue));
+		pk_rdtq->rtskid = wait_tskid(&(p_dtqcb->rwait_queue));
+		pk_rdtq->sdtqcnt = p_dtqcb->count;
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 

@@ -47,6 +47,21 @@
 class CyclicObject(KernelObject):
     def __init__(self):
         super().__init__("cyc", "cyclic")
+        self.inibList["T_NFYINFO"] = "acyc_nfyinfo_table"
+
+    def checkAutoObjid(self, numAutoObjid):
+        # 動的生成された周期通知は iprcid = TOPPERS_MASTER_PRCID 固定で生成
+        # される（kernel/cyclic.c の acre_cyc）。マスタプロセッサが時間イベ
+        # ント処理プロセッサでない構成では initialize_cyclic が即 return し、
+        # free_cyccb が BSS ゼロのまま acre_cyc の queue_delete_next が NULL を
+        # 辿る（段階2 最終レビュー Minor 1）。現行5ターゲットでは
+        # TOPPERS_TEPP_PRC の bit0 が必ず立つため到達しないが、将来ターゲット
+        # のための構造的な予防として cfg エラーで弾く。
+        if (TOPPERS_TEPP_PRC & (1 << (TOPPERS_MASTER_PRCID - 1))) == 0:
+            for _, params in cfgData[self.aidapi].items():
+                error_ercd("E_RSATR", params,
+                           f"{self.aidapi} requires the master processor "
+                           "to be a time event processor")
 
     def prepare(self, key, params):
         # cycatrが無効の場合（E_RSATR）

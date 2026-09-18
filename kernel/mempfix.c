@@ -102,11 +102,6 @@
 #endif /* LOG_REF_MPF_LEAVE */
 
 /*
- *  固定長メモリプールの数
- */
-#define tnum_mpf	((uint_t)(tmax_mpfid - TMIN_MPFID + 1))
-
-/*
  *  固定長メモリプールIDから固定長メモリプール管理ブロックを取り出すた
  *  めのマクロ
  */
@@ -118,20 +113,50 @@
  */
 #ifdef TOPPERS_mpfini
 
+/*
+ *  使用していない固定長メモリプール管理ブロックのリスト
+ *
+ *  MPFCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する．acre_mpfは取り出した直後に
+ *  queue_initializeで作り直すため，TA_TPRI（優先度順待ちキュー）と
+ *  干渉しない．
+ */
+QUEUE	free_mpfcb;
+
 void
 initialize_mempfix(PCB *p_my_pcb)
 {
-	uint_t	i;
+	uint_t	i, j;
 	MPFCB	*p_mpfcb;
+	MPFINIB	*p_mpfinib;
 
 	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
-		for (i = 0; i < tnum_mpf; i++) {
+		for (i = 0; i < tnum_smpf; i++) {
 			p_mpfcb = p_mpfcb_table[i];
 			queue_initialize(&(p_mpfcb->wait_queue));
 			p_mpfcb->p_mpfinib = &(mpfinib_table[i]);
 			p_mpfcb->fblkcnt = p_mpfcb->p_mpfinib->blkcnt;
 			p_mpfcb->unused = 0U;
 			p_mpfcb->freelist = INDEX_NULL;
+		}
+
+		/*
+		 *  動的生成用スロットの初期化
+		 *
+		 *  固定長メモリプールはプロセッサ親和を持たない（MPFINIBに
+		 *  iprcid/affinityが無く，MPFCBにp_pcbが無い）ため，段階2の
+		 *  cyc/almのようなプロセッサ判定や充填は一切不要である．本関数は
+		 *  元からマスタプロセッサ限定なので，そのブロックの中で続けて
+		 *  初期化する．他プロセッサへの可視性は，本関数の呼出し後の
+		 *  barrier_syncが保証する（段階1のfree_tcbと同じ論証）．
+		 */
+		queue_initialize(&free_mpfcb);
+		for (j = 0; i < tnum_mpf; i++, j++) {
+			p_mpfcb = p_mpfcb_table[i];
+			p_mpfinib = &(ampfinib_table[j]);
+			p_mpfinib->mpfatr = TA_NOEXS;
+			p_mpfcb->p_mpfinib = ((const MPFINIB *) p_mpfinib);
+			queue_insert_prev(&free_mpfcb, &(p_mpfcb->wait_queue));
 		}
 	}
 }
@@ -165,6 +190,229 @@ get_mpf_block(MPFCB *p_mpfcb, void **p_blk)
 #endif /* TOPPERS_mpfget */
 
 /*
+ *  固定長メモリプールの生成
+ */
+#ifdef TOPPERS_acre_mpf
+
+#ifndef LOG_ACRE_MPF_ENTER
+#define LOG_ACRE_MPF_ENTER(pk_cmpf)
+#endif /* LOG_ACRE_MPF_ENTER */
+
+#ifndef LOG_ACRE_MPF_LEAVE
+#define LOG_ACRE_MPF_LEAVE(ercd)
+#endif /* LOG_ACRE_MPF_LEAVE */
+
+ER_ID
+acre_mpf(const T_CMPF *pk_cmpf)
+{
+	MPFCB	*p_mpfcb;
+	MPFINIB	*p_mpfinib;
+	ATR		mpfatr;
+	uint_t	blkcnt;
+	uint_t	blksz;
+	MPF_T	*mpf;
+	MPFMB	*p_mpfmb;
+	ER		ercd;
+
+	LOG_ACRE_MPF_ENTER(pk_cmpf);
+	CHECK_TSKCTX_UNL();
+
+	mpfatr = pk_cmpf->mpfatr;
+	blkcnt = pk_cmpf->blkcnt;
+	blksz = pk_cmpf->blksz;
+	mpf = pk_cmpf->mpf;
+	p_mpfmb = pk_cmpf->mpfmb;
+
+	CHECK_VALIDATR(mpfatr, TA_TPRI);
+	CHECK_PAR(blkcnt != 0);
+	CHECK_PAR(blksz != 0);
+
+	/*
+	 *  ブロック領域と管理領域のサイズ計算があふれないこと（3件）
+	 *
+	 *  ★dcre（extension/dcre/kernel/mempfix.c）にこれらの検査は無い．
+	 *  acre_mpfは2段確保（①ブロック領域 ②管理領域）であり，あふれうる
+	 *  箇所が3つある．
+	 *
+	 *  (a) ROUND_MPF_T(blksz) の丸めそのもの
+	 *      TOPPERS_ROUND_SZ(sz, unit) は ((sz) + (unit) - 1) & ~((unit) - 1)
+	 *      であり，blkszがsize_tの最大値に近いと加算があふれて丸め結果が
+	 *      0（またはblkszより小さい値）になる．結果，malloc_mpk(0)が成功し，
+	 *      p_mpfinib->blkszに0が入った固定長メモリプールができあがる．
+	 *      get_mpfは同じ番地を何度も配ることになる．
+	 *  (b) ROUND_MPF_T(blksz) * blkcnt（①ブロック領域）
+	 *  (c) sizeof(MPFMB) * blkcnt（②管理領域）
+	 *      いずれもacre_dtqと同じ理由（32bitで積があふれる）．
+	 *      ②があふれた場合は①の巻き戻し経路（下の pk_cmpf->mpf 判定）を
+	 *      通るが，そもそも「小さすぎる管理領域の確保に成功する」ので
+	 *      巻き戻しは起こらず，MPFMB配列の外を触るプールが生まれる．
+	 *
+	 *  (a)を先に置くのは，(b)の除数 ROUND_MPF_T(blksz) が壊れていない
+	 *  ことを(b)より前に保証するためである．blksz != 0 は直前で検査済み
+	 *  なので，(a)を通れば ROUND_MPF_T(blksz) >= sizeof(MPF_T) > 0 であり，
+	 *  (b)の除算は0除算にならない．
+	 */
+	CHECK_PAR(blksz <= (SIZE_MAX - (sizeof(MPF_T) - 1)));
+	CHECK_PAR(blkcnt <= (SIZE_MAX / ROUND_MPF_T(blksz)));
+	CHECK_PAR(blkcnt <= (SIZE_MAX / sizeof(MPFMB)));
+
+	if (mpf != NULL) {
+		CHECK_PAR(MPF_ALIGN(mpf));
+	}
+	if (p_mpfmb != NULL) {
+		CHECK_PAR(MB_ALIGN(p_mpfmb));
+	}
+
+	lock_cpu();
+	acquire_glock();
+	if (tnum_mpf == tnum_smpf || queue_empty(&free_mpfcb)) {
+		ercd = E_NOID;
+	}
+	else {
+		/*
+		 *  ①固定長メモリプール領域の確保
+		 *
+		 *  ユーザがmpfを与えた場合はそれを使い，TA_MEMALLOCを立てない．
+		 */
+		if (mpf == NULL) {
+			mpf = malloc_mpk(ROUND_MPF_T(blksz) * blkcnt);
+			mpfatr |= TA_MEMALLOC;
+		}
+		if (mpf == NULL) {
+			ercd = E_NOMEM;
+		}
+		else {
+			/*
+			 *  ②管理領域の確保
+			 *
+			 *  ★②に失敗したときは①でカーネルが確保した分だけを
+			 *  巻き戻す．判定にローカル変数mpfを使うと①で上書き
+			 *  されているため区別できないので，パケットの元の値
+			 *  pk_cmpf->mpfを見る（dcre mempfix.c:250と同一）．
+			 */
+			if (p_mpfmb == NULL) {
+				p_mpfmb = malloc_mpk(sizeof(MPFMB) * blkcnt);
+				mpfatr |= TA_MBALLOC;
+			}
+			if (p_mpfmb == NULL) {
+				if (pk_cmpf->mpf == NULL) {
+					free_mpk(mpf);
+				}
+				ercd = E_NOMEM;
+			}
+			else {
+				/*
+				 *  ★E_NOMEMのときfree-listからCBを取り出していない
+				 *  ことが重要である（2段とも確保に成功してから初めて
+				 *  queue_delete_nextする）．段階1のacre_tskと同じ順序．
+				 */
+				p_mpfcb = ((MPFCB *) queue_delete_next(&free_mpfcb));
+				p_mpfinib = (MPFINIB *)(p_mpfcb->p_mpfinib);
+				p_mpfinib->mpfatr = mpfatr;
+				p_mpfinib->blkcnt = blkcnt;
+				p_mpfinib->blksz = ROUND_MPF_T(blksz);
+				p_mpfinib->mpf = mpf;
+				p_mpfinib->p_mpfmb = p_mpfmb;
+
+				queue_initialize(&(p_mpfcb->wait_queue));
+				p_mpfcb->fblkcnt = p_mpfcb->p_mpfinib->blkcnt;
+				p_mpfcb->unused = 0U;
+				p_mpfcb->freelist = INDEX_NULL;
+				ercd = MPFID(p_mpfcb);
+			}
+		}
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_MPF_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_mpf */
+
+/*
+ *  固定長メモリプールの削除
+ */
+#ifdef TOPPERS_del_mpf
+
+#ifndef LOG_DEL_MPF_ENTER
+#define LOG_DEL_MPF_ENTER(mpfid)
+#endif /* LOG_DEL_MPF_ENTER */
+
+#ifndef LOG_DEL_MPF_LEAVE
+#define LOG_DEL_MPF_LEAVE(ercd)
+#endif /* LOG_DEL_MPF_LEAVE */
+
+ER
+del_mpf(ID mpfid)
+{
+	MPFCB	*p_mpfcb;
+	MPFINIB	*p_mpfinib;
+	ER		ercd;
+	TCB		*p_selftsk;
+	PCB		*p_my_pcb;
+
+	LOG_DEL_MPF_ENTER(mpfid);
+	CHECK_TSKCTX_UNL_MYSTATE(&p_selftsk);
+	CHECK_ID(VALID_MPFID(mpfid));
+	p_mpfcb = get_mpfcb(mpfid);
+
+	lock_cpu();
+	acquire_glock();
+	p_my_pcb = get_my_pcb();
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (mpfid <= tmax_smpfid) {
+		ercd = E_OBJ;
+	}
+	else {
+		/*
+		 *  待ちタスクがいても削除は成功し，待ちタスクはE_DLTで強制
+		 *  解除される．init_wait_queueはMP対応済み（wait.c:215-228）で，
+		 *  既存のini_mpfと同一の機構である．獲得済みのメモリブロックは
+		 *  返却されないまま領域ごと解放される（dcre意味論）．
+		 */
+		init_wait_queue(p_my_pcb, &(p_mpfcb->wait_queue));
+		p_mpfinib = (MPFINIB *)(p_mpfcb->p_mpfinib);
+		/*
+		 *  ★順序制約：属性の読み（ビット検査2件）はTA_NOEXSの書込みより
+		 *  前で行う．TA_NOEXSは((ATR)(-1))＝全ビットが1であるため，
+		 *  TA_NOEXSを書いた後では(mpfatr & TA_MEMALLOC) != 0Uも
+		 *  (mpfatr & TA_MBALLOC) != 0Uも必ず真になり，ユーザ供給の
+		 *  領域まで解放してしまう（プールの破壊）．
+		 *  dcre mempfix.c:308-314 も同じ順序．
+		 */
+		if ((p_mpfinib->mpfatr & TA_MEMALLOC) != 0U) {
+			free_mpk(p_mpfinib->mpf);
+		}
+		if ((p_mpfinib->mpfatr & TA_MBALLOC) != 0U) {
+			free_mpk(p_mpfinib->p_mpfmb);
+		}
+		p_mpfinib->mpfatr = TA_NOEXS;
+		queue_insert_prev(&free_mpfcb, &(p_mpfcb->wait_queue));
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
+	release_glock();
+  unlock_and_exit:
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_MPF_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_mpf */
+
+/*
  *  固定長メモリブロックの獲得
  */
 #ifdef TOPPERS_get_mpf
@@ -185,7 +433,10 @@ get_mpf(ID mpfid, void **p_blk)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (p_mpfcb->fblkcnt > 0) {
@@ -231,7 +482,10 @@ pget_mpf(ID mpfid, void **p_blk)
 
 	lock_cpu();
 	acquire_glock();
-	if (p_mpfcb->fblkcnt > 0) {
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_mpfcb->fblkcnt > 0) {
 		get_mpf_block(p_mpfcb, p_blk);
 		ercd = E_OK;
 	}
@@ -270,7 +524,10 @@ tget_mpf(ID mpfid, void **p_blk, TMO tmout)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (p_mpfcb->fblkcnt > 0) {
@@ -322,33 +579,52 @@ rel_mpf(ID mpfid, void *blk)
 	CHECK_TSKCTX_UNL_MYSTATE(&p_selftsk);
 	CHECK_ID(VALID_MPFID(mpfid));
 	p_mpfcb = get_mpfcb(mpfid);
-	CHECK_PAR(p_mpfcb->p_mpfinib->mpf <= blk);
-	blkoffset = ((char *) blk) - (char *)(p_mpfcb->p_mpfinib->mpf);
-	CHECK_PAR(blkoffset % p_mpfcb->p_mpfinib->blksz == 0U);
-	CHECK_PAR(blkoffset / p_mpfcb->p_mpfinib->blksz < p_mpfcb->unused);
-	blkidx = (uint_t)(blkoffset / p_mpfcb->p_mpfinib->blksz);
-	CHECK_PAR(p_mpfcb->p_mpfinib->p_mpfmb[blkidx].next == INDEX_ALLOC);
 
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (!queue_empty(&(p_mpfcb->wait_queue))) {
-		p_tcb = (TCB *) queue_delete_next(&(p_mpfcb->wait_queue));
-		p_tcb->winfo_obj.mpf.blk = blk;
-		wait_complete(p_my_pcb, p_tcb);
-		if (p_selftsk != p_my_pcb->p_schedtsk) {
-			release_glock();
-			dispatch();
-			ercd = E_OK;
-			goto unlock_and_exit;
-		}
-		ercd = E_OK;
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
 	else {
-		p_mpfcb->fblkcnt++;
-		p_mpfcb->p_mpfinib->p_mpfmb[blkidx].next = p_mpfcb->freelist;
-		p_mpfcb->freelist = blkidx;
-		ercd = E_OK;
+		/*
+		 *  ★dcreに倣い，ブロック番地の妥当性検査をロック取得前の
+		 *  CHECK_PAR 4件からロック内のこの位置へ移した
+		 *  （dcre mempfix.c:487-495）．削除済み（TA_NOEXS）の
+		 *  固定長メモリプールに対しては，p_mpfinib->mpfも
+		 *  p_mpfinib->p_mpfmbもfree_mpk済みの番地であり，
+		 *  E_NOEXSゲートより前にp_mpfmb[blkidx]をデリファレンス
+		 *  すると解放済み領域を読むことになるため．
+		 *  ★4条件の評価順は変えないこと．blkidxが範囲外のときは
+		 *  第3条件（blkoffset / blksz < unused）で短絡し，
+		 *  第4条件のp_mpfmb[blkidx]は評価されない．
+		 */
+		blkoffset = ((char *) blk) - (char *)(p_mpfcb->p_mpfinib->mpf);
+		blkidx = (uint_t)(blkoffset / p_mpfcb->p_mpfinib->blksz);
+		if (!(p_mpfcb->p_mpfinib->mpf <= blk)
+				|| !(blkoffset % p_mpfcb->p_mpfinib->blksz == 0U)
+				|| !(blkoffset / p_mpfcb->p_mpfinib->blksz < p_mpfcb->unused)
+				|| !(p_mpfcb->p_mpfinib->p_mpfmb[blkidx].next == INDEX_ALLOC)) {
+			ercd = E_PAR;
+		}
+		else if (!queue_empty(&(p_mpfcb->wait_queue))) {
+			p_tcb = (TCB *) queue_delete_next(&(p_mpfcb->wait_queue));
+			p_tcb->winfo_obj.mpf.blk = blk;
+			wait_complete(p_my_pcb, p_tcb);
+			if (p_selftsk != p_my_pcb->p_schedtsk) {
+				release_glock();
+				dispatch();
+				ercd = E_OK;
+				goto unlock_and_exit;
+			}
+			ercd = E_OK;
+		}
+		else {
+			p_mpfcb->fblkcnt++;
+			p_mpfcb->p_mpfinib->p_mpfmb[blkidx].next = p_mpfcb->freelist;
+			p_mpfcb->freelist = blkidx;
+			ercd = E_OK;
+		}
 	}
 	release_glock();
   unlock_and_exit:
@@ -382,17 +658,22 @@ ini_mpf(ID mpfid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	init_wait_queue(p_my_pcb, &(p_mpfcb->wait_queue));
-	p_mpfcb->fblkcnt = p_mpfcb->p_mpfinib->blkcnt;
-	p_mpfcb->unused = 0U;
-	p_mpfcb->freelist = INDEX_NULL;
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		release_glock();
-		dispatch();
-		ercd = E_OK;
-		goto unlock_and_exit;
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else {
+		init_wait_queue(p_my_pcb, &(p_mpfcb->wait_queue));
+		p_mpfcb->fblkcnt = p_mpfcb->p_mpfinib->blkcnt;
+		p_mpfcb->unused = 0U;
+		p_mpfcb->freelist = INDEX_NULL;
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -422,9 +703,14 @@ ref_mpf(ID mpfid, T_RMPF *pk_rmpf)
 
 	lock_cpu();
 	acquire_glock();
-	pk_rmpf->wtskid = wait_tskid(&(p_mpfcb->wait_queue));
-	pk_rmpf->fblkcnt = p_mpfcb->fblkcnt;
-	ercd = E_OK;
+	if (p_mpfcb->p_mpfinib->mpfatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		pk_rmpf->wtskid = wait_tskid(&(p_mpfcb->wait_queue));
+		pk_rmpf->fblkcnt = p_mpfcb->fblkcnt;
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 

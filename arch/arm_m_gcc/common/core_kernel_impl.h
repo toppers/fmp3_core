@@ -121,6 +121,27 @@ typedef struct task_initialization_context_block {
 
 #ifndef TOPPERS_MACRO_ONLY
 /*
+ *  タスク初期化コンテキストブロックの初期化（動的生成用）
+ */
+Inline void
+init_tskinictxb(TSKINICTXB *p_tskinictxb, size_t stksz, STK_T *stk)
+{
+	p_tskinictxb->stk_top = (uint32_t *)(stk);
+	p_tskinictxb->stk_bottom = (uint32_t *)((char *)(stk) + (stksz));
+}
+
+/*
+ *  TA_MEMALLOC で確保したスタック領域の先頭番地（free_mpk へ渡す値）
+ */
+Inline void *
+tskinictxb_memalloc_ptr(TSKINICTXB *p_tskinictxb)
+{
+	return((void *)(p_tskinictxb->stk_top));
+}
+#endif /* TOPPERS_MACRO_ONLY */
+
+#ifndef TOPPERS_MACRO_ONLY
+/*
  *  コンテキストの参照
  *
  */

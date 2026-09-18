@@ -81,6 +81,16 @@ typedef struct semaphore_control_block {
  *  セマフォIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_semid;
+extern const ID	tmax_ssemid;		/* 静的生成セマフォのID番号の最大値 */
+
+/*
+ *  使用していないセマフォ管理ブロックのリスト（semaphore.c）
+ *
+ *  SEMCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre semaphore.c:145-161 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_semcb;
 
 /*
  *  セマフォ初期化ブロックのエリア（kernel_cfg.c）
@@ -88,15 +98,39 @@ extern const ID	tmax_semid;
 extern const SEMINIB	seminib_table[];
 
 /*
+ *  動的生成セマフォの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern SEMINIB	aseminib_table[];
+
+/*
  *  セマフォ管理ブロックへのポインタテーブル（kernel_cfg.c）
  */
 extern SEMCB *const	p_semcb_table[];
 
 /*
- *  セマフォ管理ブロックからセマフォIDを取り出すためのマクロ
+ *  セマフォの数
+ *
+ *  SEMIDマクロから参照するためsemaphore.cから移設した．
  */
-#define	SEMID(p_semcb)	((ID)(((p_semcb)->p_seminib - seminib_table) \
-															+ TMIN_SEMID))
+#define tnum_sem	((uint_t)(tmax_semid - TMIN_SEMID + 1))
+#define tnum_ssem	((uint_t)(tmax_ssemid - TMIN_SEMID + 1))
+
+/*
+ *  セマフォ管理ブロックからセマフォIDを取り出すためのマクロ
+ *
+ *  FMP3のSEMCBはポインタ表（p_semcb_table）経由で参照される個別の
+ *  named staticであり，SEMCB自身の配列位置から番号を引けない．元から
+ *  SEMINIBへのポインタ差分で求めていた式を，動的生成セマフォ
+ *  （p_seminibがaseminib_tableを指す）と静的生成セマフォ
+ *  （p_seminibがseminib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCIDと同型）．AID_SEMが無い構成ではtnum_sem == tnum_ssem
+ *  となり第1項が常に偽＝従来と同一の式に落ちる．
+ */
+#define	SEMID(p_semcb) \
+	((((p_semcb)->p_seminib >= aseminib_table) \
+		&& ((p_semcb)->p_seminib < &aseminib_table[tnum_sem - tnum_ssem])) \
+	  ? ((ID)(((p_semcb)->p_seminib - aseminib_table) + TMIN_SEMID + tnum_ssem)) \
+	  : ((ID)(((p_semcb)->p_seminib - seminib_table) + TMIN_SEMID)))
 
 /*
  *  セマフォ機能の初期化

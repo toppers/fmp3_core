@@ -192,11 +192,32 @@ typedef struct task_control_block TCB;
 #define TMIN_CYCID		1		/* 周期通知IDの最小値 */
 #define TMIN_ALMID		1		/* アラーム通知IDの最小値 */
 #define TMIN_SPNID		1		/* スピンロックIDの最小値 */
+#define TMIN_ISRID		1		/* 割込みサービスルーチンIDの最小値 */
 
 /*
  *  カーネル内部で使用する属性の定義
  */
 #define TA_NOEXS		((ATR)(-1))			/* 未登録状態 */
+
+#ifndef TA_MEMALLOC
+#define TA_MEMALLOC		UINT_C(0x8000)		/* メモリ領域をカーネルで確保 */
+#endif /* TA_MEMALLOC */
+
+#ifndef TA_MBALLOC
+#define TA_MBALLOC		UINT_C(0x4000)		/* 管理領域をカーネルで確保 */
+#endif /* TA_MBALLOC */
+
+#ifndef TARGET_TSKATR
+#define TARGET_TSKATR		0U		/* ターゲット定義のタスク属性 */
+#endif /* TARGET_TSKATR */
+
+#ifndef TARGET_ISRATR
+#define TARGET_ISRATR		0U		/* ターゲット定義のISR属性 */
+#endif /* TARGET_ISRATR */
+
+#ifndef TARGET_MIN_STKSZ			/* タスクのスタックサイズの最小値 */
+#define TARGET_MIN_STKSZ	1U		/* 未定義の場合は0でないことをチェック */
+#endif /* TARGET_MIN_STKSZ */
 
 #ifndef TOPPERS_MACRO_ONLY
 
@@ -259,9 +280,20 @@ extern STK_T *const istkpt_table[];		/* スタックポインタの初期値 */
 #endif /* TOPPERS_ISTKPT */
 
 /*
+ *  カーネルメモリプール領域（kernel_cfg.c）
+ */
+extern const size_t	mpksz;		/* カーネルメモリプール領域のサイズ */
+extern MB_T *const	mpk;		/* カーネルメモリプール領域の先頭番地 */
+
+/*
  *  カーネル動作状態フラグ（kernel_cfg.c）
  */
 extern bool_t	kerflg_table[];
+
+/*
+ *  カーネルメモリプール領域有効フラグ（startup.c）
+ */
+extern bool_t	mpk_valid;
 
 /*
  *  カーネルの起動／終了に用いるバリア同期（startup.c）
@@ -279,6 +311,48 @@ extern void	sta_ker(void);
 extern void	exit_kernel(PCB *p_my_pcb);
 
 /*
+ *  メモリプール領域の管理（startup.c）
+ */
+extern bool_t initialize_mempool(MB_T *mempool, size_t size);
+extern void *malloc_mempool(MB_T *mempool, size_t size);
+extern void *aligned_alloc_mempool(MB_T *mempool,
+										size_t alignment, size_t size);
+extern void free_mempool(MB_T *mempool, void *ptr);
+
+/*
+ *  カーネルメモリプール領域からのメモリ獲得／解放
+ */
+Inline void *
+malloc_mpk(size_t size)
+{
+	if (mpk_valid) {
+		return(malloc_mempool(mpk, size));
+	}
+	else {
+		return(NULL);
+	}
+}
+
+Inline void *
+aligned_alloc_mpk(size_t alignment, size_t size)
+{
+	if (mpk_valid) {
+		return(aligned_alloc_mempool(mpk, alignment, size));
+	}
+	else {
+		return(NULL);
+	}
+}
+
+Inline void
+free_mpk(void *ptr)
+{
+	if (mpk_valid) {
+		free_mempool(mpk, ptr);
+	}
+}
+
+/*
  *  ディスパッチハンドラ（startup.c）
  */
 extern void dispatch_handler(void);
@@ -292,6 +366,20 @@ extern void ext_ker_handler(void);
  *  通知ハンドラの型定義
  */
 typedef void	(*NFYHDR)(EXINF exinf);
+
+/*
+ *  通知方法のエラーチェック（time_manage.c）
+ */
+extern ER		check_nfyinfo(const T_NFYINFO *p_nfyinfo);
+
+/*
+ *  通知ハンドラ（time_manage.c）
+ *
+ *  exinfとして渡されたT_NFYINFOに従い，変数設定・タスク起動等の通知
+ *  処理を行うトランポリン．動的生成されたcyc/almのうち通知方法が
+ *  TNFY_HANDLER以外のものは，nfyhdrとしてこの関数を登録する．
+ */
+extern void		notify_handler(EXINF exinf);
 
 #endif /* TOPPERS_MACRO_ONLY */
 #endif /* TOPPERS_KERNEL_IMPL_H */

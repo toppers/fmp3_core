@@ -102,6 +102,16 @@ typedef struct fixed_memorypool_control_block {
  *  固定長メモリプールIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_mpfid;
+extern const ID	tmax_smpfid;		/* 静的生成固定長メモリプールのID番号の最大値 */
+
+/*
+ *  使用していない固定長メモリプール管理ブロックのリスト（mempfix.c）
+ *
+ *  MPFCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre mempfix.c:159-165 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_mpfcb;
 
 /*
  *  固定長メモリプール初期化ブロックのエリア（kernel_cfg.c）
@@ -109,16 +119,40 @@ extern const ID	tmax_mpfid;
 extern const MPFINIB	mpfinib_table[];
 
 /*
+ *  動的生成固定長メモリプールの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern MPFINIB	ampfinib_table[];
+
+/*
  *  固定長メモリプール管理ブロックへのポインタテーブル（kernel_cfg.c）
  */
 extern MPFCB *const		p_mpfcb_table[];
 
 /*
+ *  固定長メモリプールの数
+ *
+ *  MPFIDマクロから参照するためmempfix.cから移設した．
+ */
+#define tnum_mpf	((uint_t)(tmax_mpfid - TMIN_MPFID + 1))
+#define tnum_smpf	((uint_t)(tmax_smpfid - TMIN_MPFID + 1))
+
+/*
  *  固定長メモリプール管理ブロックから固定長メモリプールIDを取り出すた
  *  めのマクロ
+ *
+ *  FMP3のMPFCBはポインタ表（p_mpfcb_table）経由で参照される個別の
+ *  named staticであり，MPFCB自身の配列位置から番号を引けない．元から
+ *  MPFINIBへのポインタ差分で求めていた式を，動的生成固定長メモリプール
+ *  （p_mpfinibがampfinib_tableを指す）と静的生成固定長メモリプール
+ *  （p_mpfinibがmpfinib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCID・段階3aのSEMIDと同型）．AID_MPFが無い構成では
+ *  tnum_mpf == tnum_smpfとなり第1項が常に偽＝従来と同一の式に落ちる．
  */
-#define	MPFID(p_mpfcb)	((ID)(((p_mpfcb)->p_mpfinib - mpfinib_table) \
-															+ TMIN_MPFID))
+#define	MPFID(p_mpfcb) \
+	((((p_mpfcb)->p_mpfinib >= ampfinib_table) \
+		&& ((p_mpfcb)->p_mpfinib < &ampfinib_table[tnum_mpf - tnum_smpf])) \
+	  ? ((ID)(((p_mpfcb)->p_mpfinib - ampfinib_table) + TMIN_MPFID + tnum_smpf)) \
+	  : ((ID)(((p_mpfcb)->p_mpfinib - mpfinib_table) + TMIN_MPFID)))
 
 /*
  *  固定長メモリプール機能の初期化

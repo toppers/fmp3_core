@@ -122,14 +122,62 @@ class KernelObject
     @objid = (obj + "id").to_sym
     @api = "CRE_#{@OBJ}".to_sym
     @omit_cb = false
+    @noobj = ("no" + obj).to_sym
+    @aidapi = "AID_#{@OBJ}".to_sym
+    @inibList = { "#{@OBJ_S}INIB" => "a#{@obj_s}inib_table" }
+  end
+
+  #
+  #  AID_xxxが1個以上ある構成に対するオブジェクト種別ごとの追加検査．
+  #
+  #  既定では何もしない．cyc/almだけが「マスタプロセッサが時間イベント
+  #  処理プロセッサであること」を要求するためオーバライドする（段階2
+  #  最終レビュー Minor 1 の hardening）．
+  #
+  def checkAutoObjid(numAutoObjid)
   end
 
   def generate()
+    # AID_xxxの処理（クラス外専用。ENA_SPRと同じ規約: kernel/task.trb:158-161）
+    #
+    # 段階1ではkernel_api.defにAID_TSKのみが登録されている（AID_SEM等は
+    # 未登録）。$cfgDataはkernel_api.def登録済みAPIのみをキーに持つため，
+    # @aidapiが登録されていないオブジェクト（tsk以外）ではこのブロック
+    # 全体を無効化し，既存の出力（TNUM_S*ID等の新設なし）を厳密に保つ
+    # （段階3で他オブジェクトにもAID_xxxを登録すれば自動的に有効化される）。
+    hasAid = $cfgData.has_key?(@aidapi)
+    numAutoObjid = 0
+    if hasAid
+      $cfgData[@aidapi].each do |_, params|
+        if params.has_key?(:class)
+          error_ercd("E_RSATR", params, "#{@aidapi} must not be within a class")
+        end
+        numAutoObjid += params[@noobj]
+      end
+    end
+    numObjid = $cfgData[@api].size + numAutoObjid
+
+    # AID_xxxが1個以上あるのに静的オブジェクトが0個の構成は，データ構造
+    # 生成ガード（下記$cfgData[@api].size > 0）によりCB実体もアクセス
+    # テーブルも初期化関数登録も生成されないままTNUM_xxxIDだけが増える
+    # （free-list未初期化のままacreされる）．段階2ではcfgエラーで弾く．
+    if numAutoObjid > 0 && $cfgData[@api].size == 0
+      $cfgData[@aidapi].each do |_, params|
+        error_ercd("E_OBJ", params,
+                   "#{@aidapi} requires at least one #{@api} in the system")
+      end
+    end
+
+    # オブジェクト種別ごとの追加検査（既定はno-op）
+    if numAutoObjid > 0
+      checkAutoObjid(numAutoObjid)
+    end
+
     # オブジェクトの数のマクロ定義の生成（kernel_cfg.h）
     # ［NGKI1022］［NGKI1451］［NGKI1557］［NGKI1664］［NGKI1799］
     # ［NGKI2020］［NGKI3298］［NGKI2127］［NGKI2220］［NGKI2378］
     # ［NGKI2486］［NGKI3612］
-    $kernelCfgH.add("#define TNUM_#{@OBJ}ID\t#{$cfgData[@api].size}")
+    $kernelCfgH.add("#define TNUM_#{@OBJ}ID\t#{numObjid}")
 
     # オブジェクトのID番号のマクロ定義の生成（kernel_cfg.h）
     $cfgData[@api].sort.each do |_, params|
@@ -147,8 +195,19 @@ class KernelObject
     end
 
     # オブジェクトID番号の最大値
-    $kernelCfgC.add2("const ID _kernel_tmax_#{@obj}id" \
+    if hasAid
+      $kernelCfgC.add("const ID _kernel_tmax_#{@obj}id" \
 							" = (TMIN_#{@OBJ}ID + TNUM_#{@OBJ}ID - 1);")
+      $kernelCfgC.add("#define TNUM_S#{@OBJ}ID\t#{$cfgData[@api].size}")
+      $kernelCfgC.add2("const ID _kernel_tmax_s#{@obj}id" \
+							" = (TMIN_#{@OBJ}ID + TNUM_S#{@OBJ}ID - 1);")
+    else
+      $kernelCfgC.add2("const ID _kernel_tmax_#{@obj}id" \
+							" = (TMIN_#{@OBJ}ID + TNUM_#{@OBJ}ID - 1);")
+    end
+
+    # inib_tableのサイズトークン（AID登録済みなら静的数のみのサイズへ）
+    inibSizeToken = hasAid ? "TNUM_S#{@OBJ}ID" : "TNUM_#{@OBJ}ID"
 
     # データ構造
     if $cfgData[@api].size > 0
@@ -177,7 +236,7 @@ class KernelObject
 
       # オブジェクト初期化ブロックの生成
       $kernelCfgC.add("const #{@OBJ_S}INIB _kernel_#{@obj_s}inib_table" \
-													"[TNUM_#{@OBJ}ID] = {")
+													"[#{inibSizeToken}] = {")
       $cfgData[@api].sort.each_with_index do |(key, params), index|
         $kernelCfgC.add(",") if index > 0
         $kernelCfgC.append("\t{ " + generateInib(key, params) + " }")
@@ -192,6 +251,9 @@ class KernelObject
 				"static #{@OBJ_S}CB _kernel_#{@obj_s}cb_#{params[@objid]}", \
 				SecnameKernelData(params[:class]))
         end
+        1.upto(numAutoObjid) do |i|
+          $kernelCfgC.add("static #{@OBJ_S}CB _kernel_a#{@obj_s}cb_#{i};")
+        end
         $kernelCfgC.add
 
         # オブジェクト管理ブロックへのアクセステーブル
@@ -200,6 +262,10 @@ class KernelObject
         $cfgData[@api].sort.each_with_index do |(_, params), index|
           $kernelCfgC.add(",") if index > 0
           $kernelCfgC.append("\t&_kernel_#{@obj_s}cb_#{params[@objid]}")
+        end
+        1.upto(numAutoObjid) do |i|
+          $kernelCfgC.add(",")
+          $kernelCfgC.append("\t&_kernel_a#{@obj_s}cb_#{i}")
         end
         $kernelCfgC.add
         $kernelCfgC.add2("};")
@@ -214,6 +280,19 @@ class KernelObject
       if !@omit_cb
         $kernelCfgC.add2("TOPPERS_EMPTY_LABEL(#{@OBJ_S}CB *const, " \
 										"_kernel_p_#{@obj_s}cb_table);")
+      end
+    end
+
+    # 動的生成オブジェクト用の初期化ブロック（RAM・非const）。
+    # @aidapiがkernel_api.defに登録されているオブジェクトのみ出力する
+    # （段階1ではAID_TSKのみ登録済み。他オブジェクトは既存出力のまま）。
+    if hasAid
+      @inibList.each do |type, array|
+        if numAutoObjid > 0
+          $kernelCfgC.add2("#{type} _kernel_#{array}[#{numAutoObjid}];")
+        else
+          $kernelCfgC.add2("TOPPERS_EMPTY_LABEL(#{type}, _kernel_#{array});")
+        end
       end
     end
   end
@@ -764,3 +843,52 @@ end
 $kernelCfgH.append(<<EOS)
 #endif /* TOPPERS_KERNEL_CFG_H */
 EOS
+
+#
+#  カーネルメモリプール領域
+#
+$kernelCfgC.comment_header("Kernel Memory Pool Area")
+
+if $cfgData[:DEF_MPK].size == 0
+  mpksz = "0"
+  mpk = "NULL"
+else
+  # 静的API「DEF_MPK」が複数ある（E_OBJ）
+  if ($cfgData[:DEF_MPK].size > 1)
+    error("E_OBJ: too many DEF_MPK")
+  end
+
+  params0 = $cfgData[:DEF_MPK][1]
+
+  # クラスの囲みの中に記述されている場合（E_RSATR。クラス外専用API）
+  if params0.has_key?(:class)
+    error_ercd("E_RSATR", params0, "DEF_MPK must not be within a class")
+  end
+
+  # パラメータが省略された時のデフォルト値の設定
+  params0[:mpk] ||= "NULL"
+
+  # mpkszが0の場合（E_PAR）
+  if params0[:mpksz] == 0
+    error_wrong("E_PAR", params0, :mpksz, "zero")
+  end
+
+  if params0[:mpk] == "NULL"
+    # カーネルメモリプール領域の自動割付け
+    $kernelCfgC.add("static MB_T _kernel_memory_pool" \
+						"[COUNT_MB_T(#{params0[:mpksz]})];")
+    mpksz = "ROUND_MB_T(#{params0[:mpksz]})"
+    mpk = "_kernel_memory_pool"
+  else
+    # mpkszがターゲット定義の制約に合致しない場合（E_PAR）
+    if (params0[:mpksz] & ($CHECK_MB_ALIGN - 1)) != 0
+      error_wrong("E_PAR", params0, :mpksz, "not aligned")
+    end
+
+    mpksz = "(#{params0[:mpksz]})"
+    mpk = "(void *)(#{params0[:mpk]})"
+  end
+end
+
+$kernelCfgC.add("const size_t _kernel_mpksz = #{mpksz};")
+$kernelCfgC.add2("MB_T *const _kernel_mpk = #{mpk};")

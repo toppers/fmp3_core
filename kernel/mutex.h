@@ -81,6 +81,16 @@ typedef struct mutex_control_block {
  *  ミューテックスIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_mtxid;
+extern const ID	tmax_smtxid;		/* 静的生成ミューテックスのID番号の最大値 */
+
+/*
+ *  使用していないミューテックス管理ブロックのリスト（mutex.c）
+ *
+ *  MTXCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre mutex.c:164-171 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_mtxcb;
 
 /*
  *  ミューテックス初期化ブロックのエリア（kernel_cfg.c）
@@ -88,15 +98,39 @@ extern const ID	tmax_mtxid;
 extern const MTXINIB	mtxinib_table[];
 
 /*
+ *  動的生成ミューテックスの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern MTXINIB	amtxinib_table[];
+
+/*
  *  ミューテックス管理ブロックへのポインタテーブル（kernel_cfg.c）
  */
 extern MTXCB *const	p_mtxcb_table[];
 
 /*
- *  ミューテックス管理ブロックからミューテックスIDを取り出すためのマクロ
+ *  ミューテックスの数
+ *
+ *  MTXIDマクロから参照するためmutex.cから移設した．
  */
-#define	MTXID(p_mtxcb)	((ID)(((p_mtxcb)->p_mtxinib - mtxinib_table) \
-															+ TMIN_MTXID))
+#define tnum_mtx	((uint_t)(tmax_mtxid - TMIN_MTXID + 1))
+#define tnum_smtx	((uint_t)(tmax_smtxid - TMIN_MTXID + 1))
+
+/*
+ *  ミューテックス管理ブロックからミューテックスIDを取り出すためのマクロ
+ *
+ *  FMP3のMTXCBはポインタ表（p_mtxcb_table）経由で参照される個別の
+ *  named staticであり，MTXCB自身の配列位置から番号を引けない．元から
+ *  MTXINIBへのポインタ差分で求めていた式を，動的生成ミューテックス
+ *  （p_mtxinibがamtxinib_tableを指す）と静的生成ミューテックス
+ *  （p_mtxinibがmtxinib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCIDと同型）．AID_MTXが無い構成ではtnum_mtx == tnum_smtx
+ *  となり第1項が常に偽＝従来と同一の式に落ちる．
+ */
+#define	MTXID(p_mtxcb) \
+	((((p_mtxcb)->p_mtxinib >= amtxinib_table) \
+		&& ((p_mtxcb)->p_mtxinib < &amtxinib_table[tnum_mtx - tnum_smtx])) \
+	  ? ((ID)(((p_mtxcb)->p_mtxinib - amtxinib_table) + TMIN_MTXID + tnum_smtx)) \
+	  : ((ID)(((p_mtxcb)->p_mtxinib - mtxinib_table) + TMIN_MTXID)))
 
 /*
  *  ミューテックス機能の初期化

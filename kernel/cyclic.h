@@ -49,6 +49,7 @@
 
 #include "kernel_impl.h"
 #include "time_event.h"
+#include <queue.h>
 
 /*
  *  周期通知初期化ブロック
@@ -80,6 +81,15 @@ typedef struct cyclic_handler_control_block {
  *  周期通知IDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_cycid;
+extern const ID	tmax_scycid;		/* 静的生成周期通知のID番号の最大値 */
+
+/*
+ *  使用していない周期通知管理ブロックのリスト（cyclic.c）
+ *
+ *  CYCCBの先頭にはキューにつなぐための領域がないため，タイムイベント
+ *  ブロック（tmevtb）の領域を用いる（dcre cyclic.c:118-121 の技法）．
+ */
+extern QUEUE	free_cyccb;
 
 /*
  *  周期通知初期化ブロックのエリア（kernel_cfg.c）
@@ -87,9 +97,40 @@ extern const ID	tmax_cycid;
 extern const CYCINIB	cycinib_table[];
 
 /*
+ *  動的生成周期通知の初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern CYCINIB	acycinib_table[];
+
+/*
+ *  動的生成周期通知の通知方法の格納エリア（kernel_cfg.c・RAM）
+ */
+extern T_NFYINFO	acyc_nfyinfo_table[];
+
+/*
  *  周期通知管理ブロックのエリア（kernel_cfg.c）
  */
 extern CYCCB *const	p_cyccb_table[];
+
+/*
+ *  周期通知の数
+ */
+#define tnum_cyc	((uint_t)(tmax_cycid - TMIN_CYCID + 1))
+#define tnum_scyc	((uint_t)(tmax_scycid - TMIN_CYCID + 1))
+
+/*
+ *  CYCCBから周期通知IDを取り出すためのマクロ
+ *
+ *  FMP3のCYCCBはポインタ表（p_cyccb_table）経由で参照される個別の
+ *  named staticであり，CYCCB自身の配列位置から番号を引けない．dcreと
+ *  異なりCYCINIBへのポインタから求める（段階1のTSKIDと同型）．動的
+ *  生成周期通知（p_cycinibがacycinib_tableを指す）と静的生成周期通知
+ *  （p_cycinibがcycinib_tableを指す）の2レンジに対応する．
+ */
+#define CYCID(p_cyccb) \
+	((((p_cyccb)->p_cycinib >= acycinib_table) \
+		&& ((p_cyccb)->p_cycinib < &acycinib_table[tnum_cyc - tnum_scyc])) \
+	  ? ((ID)(((p_cyccb)->p_cycinib - acycinib_table) + TMIN_CYCID + tnum_scyc)) \
+	  : ((ID)(((p_cyccb)->p_cycinib - cycinib_table) + TMIN_CYCID)))
 
 /*
  *  周期通知機能の初期化

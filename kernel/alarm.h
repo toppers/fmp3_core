@@ -49,6 +49,7 @@
 
 #include "kernel_impl.h"
 #include "time_event.h"
+#include <queue.h>
 
 /*
  *  アラーム通知初期化ブロック
@@ -75,6 +76,15 @@ typedef struct alarm_handler_control_block {
  *  アラーム通知IDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_almid;
+extern const ID	tmax_salmid;		/* 静的生成アラーム通知のID番号の最大値 */
+
+/*
+ *  使用していないアラーム通知管理ブロックのリスト（alarm.c）
+ *
+ *  ALMCBの先頭にはキューにつなぐための領域がないため，タイムイベント
+ *  ブロック（tmevtb）の領域を用いる（dcre alarm.c:118-121 の技法）．
+ */
+extern QUEUE	free_almcb;
 
 /*
  *  アラーム通知初期化ブロックのエリア（kernel_cfg.c）
@@ -82,9 +92,39 @@ extern const ID	tmax_almid;
 extern const ALMINIB	alminib_table[];
 
 /*
+ *  動的生成アラーム通知の初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern ALMINIB	aalminib_table[];
+
+/*
+ *  動的生成アラーム通知の通知方法の格納エリア（kernel_cfg.c・RAM）
+ */
+extern T_NFYINFO	aalm_nfyinfo_table[];
+
+/*
  *  アラーム通知管理ブロックのエリアへのポインタ（kernel_cfg.c）
  */
 extern ALMCB *const	p_almcb_table[];
+
+/*
+ *  アラーム通知の数
+ */
+#define tnum_alm	((uint_t)(tmax_almid - TMIN_ALMID + 1))
+#define tnum_salm	((uint_t)(tmax_salmid - TMIN_ALMID + 1))
+
+/*
+ *  ALMCBからアラーム通知IDを取り出すためのマクロ
+ *
+ *  FMP3のALMCBはポインタ表（p_almcb_table）経由で参照される個別の
+ *  named staticであり，ALMCB自身の配列位置から番号を引けない．dcreと
+ *  異なりALMINIBへのポインタから求める（段階1のTSKIDと同型）．動的
+ *  生成アラーム通知と静的生成アラーム通知の2レンジに対応する．
+ */
+#define ALMID(p_almcb) \
+	((((p_almcb)->p_alminib >= aalminib_table) \
+		&& ((p_almcb)->p_alminib < &aalminib_table[tnum_alm - tnum_salm])) \
+	  ? ((ID)(((p_almcb)->p_alminib - aalminib_table) + TMIN_ALMID + tnum_salm)) \
+	  : ((ID)(((p_almcb)->p_alminib - alminib_table) + TMIN_ALMID)))
 
 /*
  *  アラーム通知機能の初期化

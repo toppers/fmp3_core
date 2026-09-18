@@ -80,6 +80,16 @@ typedef struct eventflag_control_block {
  *  イベントフラグIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_flgid;
+extern const ID	tmax_sflgid;		/* 静的生成イベントフラグのID番号の最大値 */
+
+/*
+ *  使用していないイベントフラグ管理ブロックのリスト（eventflag.c）
+ *
+ *  FLGCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre eventflag.c:157-170 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_flgcb;
 
 /*
  *  イベントフラグ初期化ブロックのエリア（kernel_cfg.c）
@@ -87,15 +97,39 @@ extern const ID	tmax_flgid;
 extern const FLGINIB	flginib_table[];
 
 /*
+ *  動的生成イベントフラグの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern FLGINIB	aflginib_table[];
+
+/*
  *  イベントフラグ管理ブロックへのポインタテーブル（kernel_cfg.c）
  */
 extern FLGCB *const		p_flgcb_table[];
 
 /*
- *  イベントフラグ管理ブロックからイベントフラグIDを取り出すためのマクロ
+ *  イベントフラグの数
+ *
+ *  FLGIDマクロから参照するためeventflag.cから移設した．
  */
-#define	FLGID(p_flgcb)	((ID)(((p_flgcb)->p_flginib - flginib_table) \
-															+ TMIN_FLGID))
+#define tnum_flg	((uint_t)(tmax_flgid - TMIN_FLGID + 1))
+#define tnum_sflg	((uint_t)(tmax_sflgid - TMIN_FLGID + 1))
+
+/*
+ *  イベントフラグ管理ブロックからイベントフラグIDを取り出すためのマクロ
+ *
+ *  FMP3のFLGCBはポインタ表（p_flgcb_table）経由で参照される個別の
+ *  named staticであり，FLGCB自身の配列位置から番号を引けない．元から
+ *  FLGINIBへのポインタ差分で求めていた式を，動的生成イベントフラグ
+ *  （p_flginibがaflginib_tableを指す）と静的生成イベントフラグ
+ *  （p_flginibがflginib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCIDと同型）．AID_FLGが無い構成ではtnum_flg == tnum_sflg
+ *  となり第1項が常に偽＝従来と同一の式に落ちる．
+ */
+#define	FLGID(p_flgcb) \
+	((((p_flgcb)->p_flginib >= aflginib_table) \
+		&& ((p_flgcb)->p_flginib < &aflginib_table[tnum_flg - tnum_sflg])) \
+	  ? ((ID)(((p_flgcb)->p_flginib - aflginib_table) + TMIN_FLGID + tnum_sflg)) \
+	  : ((ID)(((p_flgcb)->p_flginib - flginib_table) + TMIN_FLGID)))
 
 /*
  *  イベントフラグ機能の初期化

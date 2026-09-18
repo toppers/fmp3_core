@@ -97,11 +97,6 @@
 #endif /* LOG_REF_CYC_LEAVE */
 
 /*
- *  周期通知の数
- */
-#define tnum_cyc	((uint_t)(tmax_cycid - TMIN_CYCID + 1))
-
-/*
  *  周期通知IDから周期通知管理ブロックを取り出すためのマクロ
  */
 #define INDEX_CYC(cycid)	((uint_t)((cycid) - TMIN_CYCID))
@@ -112,17 +107,28 @@
  */
 #ifdef TOPPERS_cycini
 
+/*
+ *  使用していない周期通知管理ブロックのリスト
+ *
+ *  CYCCBの先頭にはキューにつなぐための領域がないため，タイムイベント
+ *  ブロック（tmevtb）の領域を用いる．なお64ビット環境ではQUEUEが
+ *  tmevtb.callbackまで覆うため，free-listから取り出した側（acre_cyc）
+ *  でcallback/argを再設定する必要がある．
+ */
+QUEUE	free_cyccb;
+
 void
 initialize_cyclic(PCB *p_my_pcb)
 {
-	uint_t	i;
+	uint_t	i, j;
 	CYCCB	*p_cyccb;
+	CYCINIB	*p_cycinib;
 
 	if (p_my_pcb->p_tevtcb == NULL){
 		return;
 	}
 
-	for (i = 0; i < tnum_cyc; i++) {
+	for (i = 0; i < tnum_scyc; i++) {
 		if(cycinib_table[i].iprcid == p_my_pcb->prcid) {
 			p_cyccb = p_cyccb_table[i];
 			p_cyccb->p_cycinib = &(cycinib_table[i]);
@@ -143,9 +149,193 @@ initialize_cyclic(PCB *p_my_pcb)
 			}
 		}
 	}
+
+	/*
+	 *  動的生成用スロットの初期化（マスタプロセッサのみ）
+	 *
+	 *  動的生成された周期通知はiprcid=TOPPERS_MASTER_PRCID固定で生成
+	 *  されるため，スロットの初期化もマスタプロセッサが一括して行う．
+	 *  他プロセッサへの可視性は，本関数の呼出し後のbarrier_syncが保証
+	 *  する（段階1のfree_tcbと同じ論証）．
+	 */
+	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
+		queue_initialize(&free_cyccb);
+		for (i = tnum_scyc, j = 0; i < tnum_cyc; i++, j++) {
+			p_cyccb = p_cyccb_table[i];
+			p_cycinib = &(acycinib_table[j]);
+			p_cycinib->cycatr = TA_NOEXS;
+			p_cyccb->p_cycinib = ((const CYCINIB *) p_cycinib);
+			p_cyccb->cycsta = false;
+			p_cyccb->p_pcb = p_my_pcb;
+			p_cyccb->tmevtb.callback = (CBACK) call_cyclic;
+			p_cyccb->tmevtb.arg = (void *) p_cyccb;
+			queue_insert_prev(&free_cyccb, ((QUEUE *) &(p_cyccb->tmevtb)));
+		}
+	}
 }
 
 #endif /* TOPPERS_cycini */
+
+/*
+ *  周期通知の生成
+ */
+#ifdef TOPPERS_acre_cyc
+
+#ifndef LOG_ACRE_CYC_ENTER
+#define LOG_ACRE_CYC_ENTER(pk_ccyc)
+#endif /* LOG_ACRE_CYC_ENTER */
+
+#ifndef LOG_ACRE_CYC_LEAVE
+#define LOG_ACRE_CYC_LEAVE(ercd)
+#endif /* LOG_ACRE_CYC_LEAVE */
+
+ER_ID
+acre_cyc(const T_CCYC *pk_ccyc)
+{
+	CYCCB		*p_cyccb;
+	CYCINIB		*p_cycinib;
+	ATR			cycatr;
+	RELTIM		cyctim, cycphs;
+	T_NFYINFO	*p_nfyinfo;
+	ER			ercd;
+
+	LOG_ACRE_CYC_ENTER(pk_ccyc);
+	CHECK_TSKCTX_UNL();
+
+	cycatr = pk_ccyc->cycatr;
+	cyctim = pk_ccyc->cyctim;
+	cycphs = pk_ccyc->cycphs;
+
+	CHECK_VALIDATR(cycatr, TA_STA);
+	ercd = check_nfyinfo(&(pk_ccyc->nfyinfo));
+	if (ercd != E_OK) {
+		goto error_exit;
+	}
+	CHECK_PAR(0 < cyctim && cyctim <= TMAX_RELTIM);
+	CHECK_PAR(cycphs <= TMAX_RELTIM);
+
+	lock_cpu();
+	acquire_glock();
+	if (tnum_cyc == tnum_scyc || queue_empty(&free_cyccb)) {
+		ercd = E_NOID;
+	}
+	else {
+		p_cyccb = ((CYCCB *)(((char *) queue_delete_next(&free_cyccb))
+											- offsetof(CYCCB, tmevtb)));
+		p_cycinib = (CYCINIB *)(p_cyccb->p_cycinib);
+		p_cycinib->cycatr = cycatr;
+		if (pk_ccyc->nfyinfo.nfymode == TNFY_HANDLER) {
+			p_cycinib->exinf = pk_ccyc->nfyinfo.nfy.handler.exinf;
+			p_cycinib->nfyhdr = (NFYHDR)(pk_ccyc->nfyinfo.nfy.handler.tmehdr);
+		}
+		else {
+			p_nfyinfo = &acyc_nfyinfo_table[p_cycinib - acycinib_table];
+			*p_nfyinfo = pk_ccyc->nfyinfo;
+			p_cycinib->exinf = (EXINF) p_nfyinfo;
+			p_cycinib->nfyhdr = notify_handler;
+		}
+		p_cycinib->cyctim = cyctim;
+		p_cycinib->cycphs = cycphs;
+		/*
+		 *  動的生成周期通知の割付けプロセッサ（Global Constraint 4）．
+		 *  affinityはTOPPERS_TEPP_PRC（時間イベント処理プロセッサ集合）．
+		 *  全プロセッサにするとmsta_cycでp_tevtcb==NULLのプロセッサへ
+		 *  移せてしまうため（静的側はcyclic.py:65-68が同じ制約を課す）．
+		 */
+		p_cycinib->iprcid = TOPPERS_MASTER_PRCID;
+		p_cycinib->affinity = ((uint_t) TOPPERS_TEPP_PRC);
+
+		/*
+		 *  free-listのリンクにtmevtb領域を転用しているため，64ビット
+		 *  環境ではcallbackが上書きされている．必ず再設定する．
+		 */
+		p_cyccb->p_pcb = get_pcb(TOPPERS_MASTER_PRCID);
+		p_cyccb->tmevtb.callback = (CBACK) call_cyclic;
+		p_cyccb->tmevtb.arg = (void *) p_cyccb;
+
+		if ((cycatr & TA_STA) != 0U) {
+			p_cyccb->cycsta = true;
+			tmevtb_enqueue_reltim(&(p_cyccb->tmevtb), cycphs, p_cyccb->p_pcb);
+		}
+		else {
+			p_cyccb->cycsta = false;
+		}
+		ercd = CYCID(p_cyccb);
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_CYC_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_cyc */
+
+/*
+ *  周期通知の削除
+ */
+#ifdef TOPPERS_del_cyc
+
+#ifndef LOG_DEL_CYC_ENTER
+#define LOG_DEL_CYC_ENTER(cycid)
+#endif /* LOG_DEL_CYC_ENTER */
+
+#ifndef LOG_DEL_CYC_LEAVE
+#define LOG_DEL_CYC_LEAVE(ercd)
+#endif /* LOG_DEL_CYC_LEAVE */
+
+ER
+del_cyc(ID cycid)
+{
+	CYCCB	*p_cyccb;
+	CYCINIB	*p_cycinib;
+	ER		ercd;
+
+	LOG_DEL_CYC_ENTER(cycid);
+	CHECK_TSKCTX_UNL();
+	CHECK_ID(VALID_CYCID(cycid));
+	p_cyccb = get_cyccb(cycid);
+
+	lock_cpu();
+	acquire_glock();
+	if (p_cyccb->p_cycinib->cycatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (cycid <= tmax_scycid) {
+		ercd = E_OBJ;
+	}
+	else {
+		/*
+		 *  動作中でも削除できる［dcre仕様］．動作中ならタイムイベント
+		 *  キューから外してからfree-listへ返却する．dequeueの対象は
+		 *  当該周期通知の割付けプロセッサ（stp_cycと同じ手順）．
+		 */
+		if (p_cyccb->cycsta) {
+			p_cyccb->cycsta = false;
+			tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+		}
+
+		p_cycinib = (CYCINIB *)(p_cyccb->p_cycinib);
+		p_cycinib->cycatr = TA_NOEXS;
+		/*
+		 *  p_cyccb->p_pcbはfree-list滞在中staleなまま残るが，acre_cycが
+		 *  取り出し時に無条件で再設定する（get_pcb(TOPPERS_MASTER_PRCID)）
+		 *  ため支障はない．TA_NOEXS状態のCBのp_pcbを読む経路は存在しない
+		 *  ことがこの不変量の前提である（段階2最終レビュー triage ①）．
+		 */
+		queue_insert_prev(&free_cyccb, ((QUEUE *) &(p_cyccb->tmevtb)));
+		ercd = E_OK;
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_CYC_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_cyc */
 
 /*
  *  周期通知の動作開始
@@ -165,18 +355,23 @@ sta_cyc(ID cycid)
 
 	lock_cpu();
 	acquire_glock();
-	if (p_cyccb->cycsta) {
-		tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+	if (p_cyccb->p_cycinib->cycatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
 	else {
-		p_cyccb->cycsta = true;
+		if (p_cyccb->cycsta) {
+			tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+		}
+		else {
+			p_cyccb->cycsta = true;
+		}
+		/*
+		 *  初回の起動のためのタイムイベントを登録する［ASPD1036］．
+		 */
+		tmevtb_enqueue_reltim(&(p_cyccb->tmevtb), p_cyccb->p_cycinib->cycphs,
+										p_cyccb->p_pcb);
+		ercd = E_OK;
 	}
-	/*
-	 *  初回の起動のためのタイムイベントを登録する［ASPD1036］．
-	 */
-	tmevtb_enqueue_reltim(&(p_cyccb->tmevtb), p_cyccb->p_cycinib->cycphs,
-									p_cyccb->p_pcb);
-	ercd = E_OK;
 	release_glock();
 	unlock_cpu();
 
@@ -212,20 +407,25 @@ msta_cyc(ID cycid, ID prcid)
 
 	lock_cpu();
 	acquire_glock();
-	if (p_cyccb->cycsta) {
-		tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+	if (p_cyccb->p_cycinib->cycatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
 	else {
-		p_cyccb->cycsta = true;
+		if (p_cyccb->cycsta) {
+			tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+		}
+		else {
+			p_cyccb->cycsta = true;
+		}
+		LOG_CYCMIG(p_cyccb, p_cyccb->p_pcb->prcid, prcid);
+		p_cyccb->p_pcb = get_pcb(prcid);
+		/*
+		 *  初回の起動のためのタイムイベントを登録する［ASPD1036］．
+		 */
+		tmevtb_enqueue_reltim(&(p_cyccb->tmevtb), p_cyccb->p_cycinib->cycphs,
+													p_cyccb->p_pcb);
+		ercd = E_OK;
 	}
-	LOG_CYCMIG(p_cyccb, p_cyccb->p_pcb->prcid, prcid);
-	p_cyccb->p_pcb = get_pcb(prcid);
-	/*
-	 *  初回の起動のためのタイムイベントを登録する［ASPD1036］．
-	 */
-	tmevtb_enqueue_reltim(&(p_cyccb->tmevtb), p_cyccb->p_cycinib->cycphs,
-												p_cyccb->p_pcb);
-	ercd = E_OK;
 	release_glock();
 	unlock_cpu();
 
@@ -254,11 +454,16 @@ stp_cyc(ID cycid)
 
 	lock_cpu();
 	acquire_glock();
-	if (p_cyccb->cycsta) {
-		p_cyccb->cycsta = false;
-		tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+	if (p_cyccb->p_cycinib->cycatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else {
+		if (p_cyccb->cycsta) {
+			p_cyccb->cycsta = false;
+			tmevtb_dequeue(&(p_cyccb->tmevtb), p_cyccb->p_pcb);
+		}
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 
@@ -287,15 +492,20 @@ ref_cyc(ID cycid, T_RCYC *pk_rcyc)
 
 	lock_cpu();
 	acquire_glock();
-	if (p_cyccb->cycsta) {
-		pk_rcyc->cycstat = TCYC_STA;
-		pk_rcyc->lefttim = tmevt_lefttim(&(p_cyccb->tmevtb));
+	if (p_cyccb->p_cycinib->cycatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
 	else {
-		pk_rcyc->cycstat = TCYC_STP;
+		if (p_cyccb->cycsta) {
+			pk_rcyc->cycstat = TCYC_STA;
+			pk_rcyc->lefttim = tmevt_lefttim(&(p_cyccb->tmevtb));
+		}
+		else {
+			pk_rcyc->cycstat = TCYC_STP;
+		}
+		pk_rcyc->prcid = p_cyccb->p_pcb->prcid;
+		ercd = E_OK;
 	}
-	pk_rcyc->prcid = p_cyccb->p_pcb->prcid;
-	ercd = E_OK;
 	release_glock();
 	unlock_cpu();
 

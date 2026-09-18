@@ -53,11 +53,12 @@ if "OMIT_MULTIPRC_INTERRUPT" not in globals():
 #
 #  kernel_cfg.hの生成
 #
-kernelCfgH.add(f"#define TNUM_ISRID\t{len(cfgData['CRE_ISR'])}")
-
-for _, params in sorted(cfgData["CRE_ISR"].items()):
-    kernelCfgH.add(f"#define {params['isrid']}\t{params['isrid'].val}")
-kernelCfgH.add()
+#  ★TNUM_ISRID と各ISRIDのマクロ定義は，本ファイル末尾の IsrObject().generate()
+#  が共通枠組み（kernel/kernel.py:168-175）として出力する．ISRがランタイム
+#  オブジェクトになったため，他のオブジェクト種別と同じ枠組みに載せた．
+#  本ファイルが kernelCfgH へ書くのはこの1箇所だけなので，出力位置が末尾へ
+#  移動しても kernel_cfg.h の内容は変わらない（Task 2 Step 12 で実証する）．
+#
 
 #
 #  kernel_cfg.cの生成
@@ -367,6 +368,117 @@ for _, params in sorted(cfgData["CRE_ISR"].items()):
     if "TargetCheckCreIsr" in globals():
         TargetCheckCreIsr(params)
 
+#
+#  動的ISR生成の対象とする割込み番号（ENA_DYNISR）に関するエラーチェック
+#
+#  ★このループは，下のインライン連鎖生成ループより前に置かなければならない．
+#  生成ループは cfgData["DEF_INH"] へ「生成した割込みハンドラのDEF_INH相当」を
+#  追加するので，後に置くと自分が生成したDEF_INHを競合とみなしてしまう
+#  （CRE_ISRの同じ検査が :340-345 で生成ループより前に置かれているのと同じ理由）．
+#
+dynIsrList = []
+for _, params in cfgData["ENA_DYNISR"].items():
+    # クラスの囲みの中に記述されていない場合（E_RSATR）
+    #
+    #  ENA_DYNISRはCFG_INT・CRE_ISRと同じくクラス内APIである（AID_ISRだけが
+    #  クラス外専用）．対象の割込み要求ラインが属するクラスを指定させることで，
+    #  動的ISRを実行するプロセッサ集合がCFG_INTと一致することを保証する．
+    if "class" not in params:
+        error_ercd("E_RSATR", params, "%apiname must be within a class")
+        params["class"] = TCLS_ERROR
+        continue
+
+    # intnoが有効範囲外の場合（E_PAR）
+    if params["intno"] not in INTNO_CREISR_VALID_ALL:
+        error_illegal("E_PAR", params, "intno")
+        continue
+
+    # intnoに対するCFG_INTがない場合（E_OBJ）
+    if params["intno"] not in cfgData["CFG_INT"]:
+        error_ercd("E_OBJ", params,
+                   "%%intno in %apiname is not configured with CFG_INT")
+        continue
+
+    intnoParams = cfgData["CFG_INT"][params["intno"]]
+
+    # CFG_INTとENA_DYNISRが異なるクラスの囲みの中にある場合（E_RSATR）
+    if params["class"] != intnoParams["class"]:
+        error_ercd("E_RSATR", params,
+                   "%%intno in %apiname "
+                   "does not belong to the same class with CFG_INT")
+        continue
+
+    # intnoでカーネル管理外の割込みを指定した場合（E_OBJ）
+    if intnoParams["intpri"] < TMIN_INTPRI:
+        error_ercd("E_OBJ", params,
+                   "interrupt service routine cannot handle "
+                   "non-kernel interrupt in %apiname of %%intno")
+        continue
+
+    # intnoに対応するinhnoに対してDEF_INHがある場合（E_OBJ）
+    conflict = False
+    for prcid in clsData[params["class"]]["affinityPrcList"]:
+        inhnoVal = toInhnoVal[prcid].get(params["intno"].val)
+        if inhnoVal in cfgData["DEF_INH"]:
+            error_ercd("E_OBJ", params,
+                       f"%%intno in %apiname is duplicated "
+                       f"with inhno {cfgData['DEF_INH'][inhnoVal]['inhno']}")
+            conflict = True
+    if conflict:
+        continue
+
+    dynIsrList.append(params["intno"].val)
+
+dynIsrList.sort()
+
+# ENA_DYNISRが1個以上あるのに静的なCRE_ISRが0個の構成は，共通枠組みが
+# initialize_isrの登録を len(cfgData["CRE_ISR"]) > 0 に条件づけているため
+# （kernel/kernel.py:200,257-258），isr_queue_tableが未初期化のまま
+# call_isrが走ることになる．cfgエラーで弾く．
+if len(dynIsrList) > 0 and len(cfgData["CRE_ISR"]) == 0:
+    for _, params in cfgData["ENA_DYNISR"].items():
+        error_ercd("E_OBJ", params,
+                   "%apiname requires at least one CRE_ISR in the system")
+
+# AID_ISRが1個以上あるのにENA_DYNISRが0個の構成は，適格なintnoが1つも無い
+# ためacre_isrが必ずE_OBJで失敗し，予約したISRCBが死蔵される．cfgエラーで弾く．
+numAutoIsrid = 0
+for _, params in cfgData["AID_ISR"].items():
+    numAutoIsrid += int(params["noisr"])
+if numAutoIsrid > 0 and len(dynIsrList) == 0:
+    for _, params in cfgData["AID_ISR"].items():
+        error_ercd("E_OBJ", params,
+                   "AID_ISR requires at least one ENA_DYNISR in the system")
+
+#
+#  割込みサービスルーチン呼出しキューのデータ構造
+#
+#  ★dcre（interrupt.trb:263-294）は「CFG_INTがありDEF_INHが競合しない全intno」に
+#  キューを作るが，FMP3はENA_DYNISRで明示されたintnoにだけ作る（案B-2）．
+#  これにより，ENA_DYNISRの無い構成ではキュー表が空になり，割込みハンドラの
+#  生成も従来のインライン連鎖のままになる．
+#
+isrQueueHeader = {}
+for index, intnoVal in enumerate(dynIsrList):
+    isrQueueHeader[intnoVal] = f"&(_kernel_isr_queue_table[{index}])"
+
+kernelCfgC.add2(f"const uint_t _kernel_tnum_isr_queue = {len(dynIsrList)};")
+
+if len(dynIsrList) > 0:
+    kernelCfgC.add(f"const ISR_ENTRY _kernel_isr_queue_list"
+                   f"[{len(dynIsrList)}] = {{")
+    for index, intnoVal in enumerate(dynIsrList):
+        if index > 0:
+            kernelCfgC.add(",")
+        kernelCfgC.append(f"\t{{ {intnoVal}, {isrQueueHeader[intnoVal]} }}")
+    kernelCfgC.add()
+    kernelCfgC.add2("};")
+    kernelCfgC.add2(f"ISRQCB _kernel_isr_queue_table[{len(dynIsrList)}];")
+else:
+    kernelCfgC.add("TOPPERS_EMPTY_LABEL(const ISR_ENTRY, "
+                   "_kernel_isr_queue_list);")
+    kernelCfgC.add2("TOPPERS_EMPTY_LABEL(ISRQCB, _kernel_isr_queue_table);")
+
 isr_flag = {}
 for prcid in range(1, TNUM_PRCID + 1):
     for intnoVal in INTNO_CREISR_VALID[prcid]:
@@ -375,6 +487,40 @@ for prcid in range(1, TNUM_PRCID + 1):
         for _, params in sorted(cfgData["CRE_ISR"].items()):
             if params["intno"] == intnoVal:
                 isrParamsList.append(params)
+
+        # ★動的ISR生成の対象（ENA_DYNISR）とされた割込み番号
+        #
+        #  静的なCRE_ISRが1本も無くてもキュー方式の割込みハンドラを生成する
+        #  （動的生成専用の割込み番号がありうるため）．クラスはCFG_INTから
+        #  取る．静的ISRがある場合も同じ値になる（CRE_ISRとCFG_INTが同一
+        #  クラスであることは :354-358 のE_RSATR検査が保証している）．
+        #
+        #  DEF_INHはaffinityPrcListに含まれる全プロセッサぶん生成する
+        #  （既存のインライン連鎖と同じ機構）．inthdr本体はisr_flagで
+        #  1回だけ生成し，全プロセッサのベクタで共有する．
+        if intnoVal in isrQueueHeader:
+            clsid = cfgData["CFG_INT"][intnoVal]["class"]
+
+            # 割込みを受け付けるプロセッサでない場合はスキップ
+            if prcid not in clsData[clsid]["affinityPrcList"]:
+                continue
+
+            inhnoVal = toInhnoVal[prcid][intnoVal]
+            cfgData["DEF_INH"][inhnoVal] = {
+                "inhno": NumStr(inhnoVal),
+                "inhatr": NumStr(TA_NULL, "TA_NULL"),
+                "inthdr": f"_kernel_inthdr_{intnoVal}",
+                "class": clsid
+            }
+
+            if not isr_flag.get(intnoVal, False):
+                kernelCfgC.add("void")
+                kernelCfgC.add(f"_kernel_inthdr_{intnoVal}(void)")
+                kernelCfgC.add("{")
+                kernelCfgC.add(f"\t_kernel_call_isr({isrQueueHeader[intnoVal]});")
+                kernelCfgC.add2("}")
+                isr_flag[intnoVal] = True
+            continue
 
         # 割込み番号intnoValに対して登録されたISRが存在する場合
         if len(isrParamsList) > 0:
@@ -440,6 +586,56 @@ for prcid in range(1, TNUM_PRCID + 1):
                     kernelCfgC.add(f"\tLOG_ISR_LEAVE({params['isrid']});")
                 kernelCfgC.add2("}")
                 isr_flag[intnoVal] = True
+
+#
+#  割込みサービスルーチンに関する一般的な情報の生成
+#
+class IsrObject(KernelObject):
+    def __init__(self):
+        super().__init__("isr", "isr")
+
+    def prepare(self, key, params):
+        # エラーチェックは実施済みなので，ここでの処理は不要
+        pass
+
+    def generateInib(self, key, params):
+        # ENA_DYNISRされていない割込み番号のISRはキューに登録されない．
+        # インライン連鎖から直接呼ばれるため，p_isr_queueはNULLでよい
+        # （initialize_isrがNULLを見てenqueueを省く）．
+        p_isr_queue = isrQueueHeader.get(params["intno"].val, "NULL")
+        return (f"({params['isratr']}), (EXINF)({params['exinf']}), "
+                f"({p_isr_queue}), "
+                f"(ISR)({params['isr']}), ({params['isrpri']})")
+
+
+IsrObject().generate()
+
+#
+#  割込みサービスルーチン生成順序テーブルの生成
+#
+#  ★dcre（interrupt.trb:338-346）は挿入順（.cfgの記述順）で生成し，
+#  TNUM_SISRIDが0のときのガードも持たない．FMP3では2点を変える．
+#
+#  (1) isrid昇順にする．initialize_isrはこの順にenqueue_isrし，enqueue_isrは
+#      「自分より真に大きいisrpriの直前」に挿入するので，キューの並びは
+#      「isrid昇順を基底とするisrpriの安定ソート」になる．これはインライン
+#      連鎖の呼出し順序（本ファイルのisrParamsListの構築とsorted()）と
+#      完全に同じである．ENA_DYNISRを足したり外したりしても同じ.cfgの
+#      呼出し順序が変わらないことを保証するために，こちらを合わせる．
+#  (2) 静的ISRが0個のときはTOPPERS_EMPTY_LABELにする（[0]配列を作らない．
+#      他の表と同じ流儀）．
+#
+if len(cfgData["CRE_ISR"]) > 0:
+    kernelCfgC.add("const ID _kernel_isrorder_table[TNUM_SISRID] = { ")
+    kernelCfgC.append("\t")
+    for index, (_, params) in enumerate(sorted(cfgData["CRE_ISR"].items())):
+        if index > 0:
+            kernelCfgC.append(", ")
+        kernelCfgC.append(f"{params['isrid']}")
+    kernelCfgC.add()
+    kernelCfgC.add2("};")
+else:
+    kernelCfgC.add2("TOPPERS_EMPTY_LABEL(const ID, _kernel_isrorder_table);")
 
 #
 #  割込みハンドラのための標準的な初期化情報の生成

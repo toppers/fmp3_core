@@ -126,6 +126,189 @@
 #endif /* LOG_GET_INF_LEAVE */
 
 /*
+ *  タスクの生成（動的生成）
+ */
+#ifdef TOPPERS_acre_tsk
+
+#ifndef LOG_ACRE_TSK_ENTER
+#define LOG_ACRE_TSK_ENTER(pk_ctsk)
+#endif /* LOG_ACRE_TSK_ENTER */
+#ifndef LOG_ACRE_TSK_LEAVE
+#define LOG_ACRE_TSK_LEAVE(ercd)
+#endif /* LOG_ACRE_TSK_LEAVE */
+
+ER_ID
+acre_tsk(const T_CTSK *pk_ctsk)
+{
+	TCB		*p_tcb;
+	TINIB	*p_tinib;
+	ATR		tskatr;
+	TASK	task;
+	PRI		itskpri;
+	size_t	stksz;
+	STK_T	*stk;
+	ER		ercd;
+	TCB		*p_selftsk;
+	PCB		*p_my_pcb;
+
+	LOG_ACRE_TSK_ENTER(pk_ctsk);
+	CHECK_TSKCTX_UNL();
+
+	tskatr = pk_ctsk->tskatr;
+	task = pk_ctsk->task;
+	itskpri = pk_ctsk->itskpri;
+	stksz = pk_ctsk->stksz;
+	stk = pk_ctsk->stk;
+
+	CHECK_VALIDATR(tskatr, TA_ACT|TA_NOACTQUE|TARGET_TSKATR);
+	CHECK_PAR(FUNC_ALIGN(task));
+	CHECK_PAR(FUNC_NONNULL(task));
+	CHECK_PAR(VALID_TPRI(itskpri));
+	CHECK_PAR(stksz >= TARGET_MIN_STKSZ);
+
+	/*
+	 *  スタックサイズの丸めがあふれないこと
+	 *
+	 *  ★dcre（extension/dcre/kernel/task_manage.c）にこの検査は無い．
+	 *  acre_tskには乗算が無いのでacre_dtq/acre_pdq/acre_mpfとは事情が
+	 *  違うが，下のROUND_STK_T(stksz)（＝(stksz + sizeof(STK_T) - 1) &
+	 *  ~(sizeof(STK_T) - 1)）の加算はあふれうる．stkszはsize_tなので，
+	 *  32bit/64bitのどちらでも到達可能である．あふれると丸め結果が0付近
+	 *  へ落ち，aligned_alloc_mpkが「成功」してゼロ長スタックのタスクが
+	 *  できあがる（init_tskinictxbはstk+stkszをスタック底に使う）．
+	 *
+	 *  ★stk != NULL（ユーザ供給）の場合はROUND_STK_Tを通らないが，
+	 *  検査を条件つきにする理由が無い（あふれるstkszはいずれにせよ
+	 *  正当な入力ではない）ので無条件に置く．
+	 */
+	CHECK_PAR(stksz <= (SIZE_MAX - (sizeof(STK_T) - 1)));
+
+	if (stk != NULL) {
+		CHECK_PAR(STKSZ_ALIGN(stksz));
+		CHECK_PAR(STACK_ALIGN(stk));
+	}
+
+	lock_cpu();
+	acquire_glock();
+	p_my_pcb = get_my_pcb();
+	p_selftsk = p_my_pcb->p_runtsk;
+	if (queue_empty(&free_tcb)) {
+		ercd = E_NOID;
+	}
+	else {
+		if (stk == NULL) {
+			stksz = ROUND_STK_T(stksz);
+			stk = aligned_alloc_mpk(alignof(STK_T), stksz);
+			tskatr |= TA_MEMALLOC;
+		}
+		if (stk == NULL) {
+			ercd = E_NOMEM;
+		}
+		else {
+			p_tcb = ((TCB *) queue_delete_next(&free_tcb));
+			p_tinib = (TINIB *)(p_tcb->p_tinib);
+			p_tinib->tskatr = tskatr;
+			p_tinib->exinf = pk_ctsk->exinf;
+			p_tinib->task = task;
+			p_tinib->ipriority = INT_PRIORITY(itskpri);
+#ifdef USE_TSKINICTXB
+			init_tskinictxb(&(p_tinib->tskinictxb), stksz, stk);
+#else /* USE_TSKINICTXB */
+			p_tinib->stksz = stksz;
+			p_tinib->stk = stk;
+#endif /* USE_TSKINICTXB */
+			p_tinib->iprcid = 1;			/* Constraint 4: PRC1 固定 */
+			p_tinib->affinity = ((uint_t)((1U << TNUM_PRCID) - 1U));
+
+			p_tcb->actque = false;
+			p_tcb->actprc = TPRC_NONE;
+			p_tcb->subpri = UINT_MAX;
+			p_tcb->p_pcb = get_pcb(1);
+			p_tcb->p_lastmtx = NULL;
+			make_dormant(p_tcb);
+			ercd = TSKID(p_tcb);
+			if ((p_tcb->p_tinib->tskatr & TA_ACT) != 0U) {
+				make_active(p_my_pcb, p_tcb);
+				if (p_selftsk != p_my_pcb->p_schedtsk) {
+					release_glock();
+					dispatch();
+					goto unlock_and_exit;
+				}
+			}
+		}
+	}
+	release_glock();
+  unlock_and_exit:
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_TSK_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_tsk */
+
+/*
+ *  タスクの削除
+ */
+#ifdef TOPPERS_del_tsk
+
+#ifndef LOG_DEL_TSK_ENTER
+#define LOG_DEL_TSK_ENTER(tskid)
+#endif /* LOG_DEL_TSK_ENTER */
+#ifndef LOG_DEL_TSK_LEAVE
+#define LOG_DEL_TSK_LEAVE(ercd)
+#endif /* LOG_DEL_TSK_LEAVE */
+
+ER
+del_tsk(ID tskid)
+{
+	TCB		*p_tcb;
+	TINIB	*p_tinib;
+	ER		ercd;
+
+	LOG_DEL_TSK_ENTER(tskid);
+	CHECK_TSKCTX_UNL();
+	CHECK_ID(VALID_TSKID(tskid));
+	p_tcb = get_tcb(tskid);
+
+	lock_cpu();
+	acquire_glock();
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (tskid <= tmax_stskid || !TSTAT_DORMANT(p_tcb->tstat)) {
+		ercd = E_OBJ;
+	}
+	else {
+		p_tinib = (TINIB *)(p_tcb->p_tinib);
+		if ((p_tinib->tskatr & TA_MEMALLOC) != 0U) {
+			/*
+			 *  自終了直後のタスクはrelease_glock後の数命令をまだ自スタック上
+			 *  で実行している可能性があり，プールがcount==0まで解放される
+			 *  と再利用で重なる理論的な窓がある（spec 2.3の受容判断を参照）．
+			 */
+#ifdef USE_TSKINICTXB
+			free_mpk(tskinictxb_memalloc_ptr(&(p_tinib->tskinictxb)));
+#else /* USE_TSKINICTXB */
+			free_mpk(p_tinib->stk);
+#endif /* USE_TSKINICTXB */
+		}
+		p_tinib->tskatr = TA_NOEXS;
+		queue_insert_prev(&free_tcb, &(p_tcb->task_queue));
+		ercd = E_OK;
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_TSK_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_tsk */
+
+/*
  *  タスクの起動［NGKI3529］
  */
 #ifdef TOPPERS_act_tsk
@@ -152,7 +335,10 @@ act_tsk(ID tskid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (TSTAT_DORMANT(p_tcb->tstat)) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (TSTAT_DORMANT(p_tcb->tstat)) {
 		make_active(p_my_pcb, p_tcb);		/*［NGKI1118］*/
 		if (p_selftsk != p_my_pcb->p_schedtsk) {
 			if (!context) {
@@ -220,7 +406,10 @@ mact_tsk(ID tskid, ID prcid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (TSTAT_DORMANT(p_tcb->tstat)) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (TSTAT_DORMANT(p_tcb->tstat)) {
 		LOG_TSKMIG(p_tcb, p_tcb->p_pcb->prcid, prcid);
 		p_new_pcb = get_pcb(prcid);
 		p_tcb->p_pcb = p_new_pcb;				/*［NGKI1132］*/
@@ -281,9 +470,14 @@ can_act(ID tskid)
 
 	lock_cpu();
 	acquire_glock();
-	ercd = p_tcb->actque ? 1 : 0;				/*［NGKI1144］*/
-	p_tcb->actque = false;						/*［NGKI1144］*/
-	p_tcb->actprc = TPRC_NONE;					/*［NGKI1145］*/
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		ercd = p_tcb->actque ? 1 : 0;				/*［NGKI1144］*/
+		p_tcb->actque = false;						/*［NGKI1144］*/
+		p_tcb->actprc = TPRC_NONE;					/*［NGKI1145］*/
+	}
 	release_glock();
 	unlock_cpu();
 
@@ -329,7 +523,10 @@ mig_tsk(ID tskid, ID prcid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_tcb->p_pcb != p_my_pcb) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_tcb->p_pcb != p_my_pcb) {
 		/*
 		 *  対象タスクが，自タスクと異なるプロセッサに割り付けられてい
 		 *  る場合
@@ -428,28 +625,33 @@ get_tst(ID tskid, STAT *p_tskstat)
 
 	lock_cpu();
 	acquire_glock();
-	tstat = p_tcb->tstat;
-	if (TSTAT_DORMANT(tstat)) {					/*［NGKI3620］*/
-		*p_tskstat = TTS_DMT;
-	}
-	else if (TSTAT_SUSPENDED(tstat)) {
-		if (TSTAT_WAITING(tstat)) {
-			*p_tskstat = TTS_WAS;
-		}
-		else {
-			*p_tskstat = TTS_SUS;
-		}
-	}
-	else if (TSTAT_WAITING(tstat)) {
-		*p_tskstat = TTS_WAI;
-	}
-	else if (p_tcb == p_tcb->p_pcb->p_runtsk) {
-		*p_tskstat = TTS_RUN;
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
 	else {
-		*p_tskstat = TTS_RDY;
+		tstat = p_tcb->tstat;
+		if (TSTAT_DORMANT(tstat)) {					/*［NGKI3620］*/
+			*p_tskstat = TTS_DMT;
+		}
+		else if (TSTAT_SUSPENDED(tstat)) {
+			if (TSTAT_WAITING(tstat)) {
+				*p_tskstat = TTS_WAS;
+			}
+			else {
+				*p_tskstat = TTS_SUS;
+			}
+		}
+		else if (TSTAT_WAITING(tstat)) {
+			*p_tskstat = TTS_WAI;
+		}
+		else if (p_tcb == p_tcb->p_pcb->p_runtsk) {
+			*p_tskstat = TTS_RUN;
+		}
+		else {
+			*p_tskstat = TTS_RDY;
+		}
+		ercd = E_OK;
 	}
-	ercd = E_OK;
 	release_glock();
 	unlock_cpu();
 
@@ -494,7 +696,10 @@ chg_pri(ID tskid, PRI tskpri)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (TSTAT_DORMANT(p_tcb->tstat)) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (TSTAT_DORMANT(p_tcb->tstat)) {
 		ercd = E_OBJ;							/*［NGKI1191］*/
 	}
 	else if ((p_tcb->boosted || TSTAT_WAIT_MTX(p_tcb->tstat))
@@ -550,7 +755,10 @@ get_pri(ID tskid, PRI *p_tskpri)
 
 	lock_cpu();
 	acquire_glock();
-	if (TSTAT_DORMANT(p_tcb->tstat)) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (TSTAT_DORMANT(p_tcb->tstat)) {
 		ercd = E_OBJ;							/*［NGKI1209］*/
 	}
 	else {
@@ -594,21 +802,26 @@ chg_spr(ID tskid, uint_t subpri)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	p_pcb = p_tcb->p_pcb;
-	p_tcb->subpri = subpri;						/*［NGKI3672］*/
-	if (TSTAT_RUNNABLE(p_tcb->tstat)) {
-		if ((subprio_primap & PRIMAP_BIT(p_tcb->priority)) != 0U
-											&& !(p_tcb->boosted)) {
-			change_subprio(p_my_pcb, p_tcb, subpri, p_pcb);	/*［NGKI3673］*/
-			if (p_selftsk != p_my_pcb->p_schedtsk) {
-				release_glock();
-				dispatch();
-				ercd = E_OK;
-				goto unlock_and_exit;
-			}
-		}  
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else {
+		p_pcb = p_tcb->p_pcb;
+		p_tcb->subpri = subpri;						/*［NGKI3672］*/
+		if (TSTAT_RUNNABLE(p_tcb->tstat)) {
+			if ((subprio_primap & PRIMAP_BIT(p_tcb->priority)) != 0U
+												&& !(p_tcb->boosted)) {
+				change_subprio(p_my_pcb, p_tcb, subpri, p_pcb);	/*［NGKI3673］*/
+				if (p_selftsk != p_my_pcb->p_schedtsk) {
+					release_glock();
+					dispatch();
+					ercd = E_OK;
+					goto unlock_and_exit;
+				}
+			}
+		}
+		ercd = E_OK;
+	}
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();

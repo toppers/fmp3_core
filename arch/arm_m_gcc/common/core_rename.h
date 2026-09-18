@@ -4,6 +4,12 @@
 #define TOPPERS_CORE_RENAME_H
 
 /*
+ *  core_kernel_impl.h
+ */
+#define sense_lock					_kernel_sense_lock
+#define unlock_cpu					_kernel_unlock_cpu
+
+/*
  *  core_kernel_impl.c
  */
 #define p_exc_tbl					_kernel_p_exc_tbl
@@ -25,7 +31,7 @@
  */
 #define core_int_entry				_kernel_core_int_entry
 #define core_exc_entry				_kernel_core_exc_entry
-#define svc_handler				    _kernel_svc_handler
+#define svc_handler					_kernel_svc_handler
 #define pendsv_handler				_kernel_pendsv_handler
 #define dispatch					_kernel_dispatch
 #define do_dispatch					_kernel_do_dispatch

@@ -47,6 +47,24 @@
 class CyclicObject < KernelObject
   def initialize()
     super("cyc", "cyclic")
+    @inibList["T_NFYINFO"] = "acyc_nfyinfo_table"
+  end
+
+  def checkAutoObjid(numAutoObjid)
+    # 動的生成された周期通知はiprcid = TOPPERS_MASTER_PRCID固定で生成さ
+    # れる（kernel/cyclic.cのacre_cyc）．マスタプロセッサが時間イベント
+    # 処理プロセッサでない構成ではinitialize_cyclicが即returnし，
+    # free_cyccbがBSSゼロのままacre_cycのqueue_delete_nextがNULLを辿る
+    # （段階2最終レビュー Minor 1）．現行5ターゲットではTOPPERS_TEPP_PRC
+    # のbit0が必ず立つため到達しないが，将来ターゲットのための構造的な
+    # 予防としてcfgエラーで弾く．
+    if ($TOPPERS_TEPP_PRC & (1 << ($TOPPERS_MASTER_PRCID - 1))) == 0
+      $cfgData[@aidapi].each do |_, params|
+        error_ercd("E_RSATR", params,
+                   "#{@aidapi} requires the master processor " \
+                   "to be a time event processor")
+      end
+    end
   end
 
   def prepare(key, params)

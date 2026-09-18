@@ -63,11 +63,23 @@
 #define VALID_CYCID(cycid)	(TMIN_CYCID <= (cycid) && (cycid) <= tmax_cycid)
 #define VALID_ALMID(almid)	(TMIN_ALMID <= (almid) && (almid) <= tmax_almid)
 #define VALID_SPNID(spnid)	(TMIN_SPNID <= (spnid) && (spnid) <= tmax_spnid)
+#define VALID_ISRID(isrid)	(TMIN_ISRID <= (isrid) && (isrid) <= tmax_isrid)
 
 /*
  *  優先度の範囲の判定
  */
 #define VALID_TPRI(tpri)	(TMIN_TPRI <= (tpri) && (tpri) <= TMAX_TPRI)
+
+/*
+ *  データ優先度の範囲の判定
+ */
+#define VALID_DPRI(dpri)	(TMIN_DPRI <= (dpri) && (dpri) <= TMAX_DPRI)
+
+/*
+ *  割込みサービスルーチン優先度の範囲の判定
+ */
+#define VALID_ISRPRI(isrpri) \
+				(TMIN_ISRPRI <= (isrpri) && (isrpri) <= TMAX_ISRPRI)
 
 /*
  *  相対時間の範囲の判定
@@ -277,6 +289,16 @@ check_dispatch_mystate(TCB **pp_selftsk)
 } while (false)
 
 /*
+ *  属性が無効なビットが立っていないかのチェック（E_RSATR）
+ */
+#define CHECK_VALIDATR(atr, valid_atr) do {					\
+	if (((atr) & ~(valid_atr)) != 0U) {						\
+		ercd = E_RSATR;										\
+		goto error_exit;									\
+	}														\
+} while (false)
+
+/*
  *  パラメータエラーのチェック（E_PAR）
  */
 #define CHECK_PAR(exp) do {									\
@@ -292,6 +314,16 @@ check_dispatch_mystate(TCB **pp_selftsk)
 #define CHECK_ILUSE(exp) do {								\
 	if (!(exp)) {											\
 		ercd = E_ILUSE;										\
+		goto error_exit;									\
+	}														\
+} while (false)
+
+/*
+ *  オブジェクト状態エラーのチェック（E_OBJ）
+ */
+#define CHECK_OBJ(exp) do {									\
+	if (!(exp)) {											\
+		ercd = E_OBJ;										\
 		goto error_exit;									\
 	}														\
 } while (false)
@@ -365,5 +397,61 @@ get_p_selftsk(void)
 }
 
 #endif /* OMIT_GET_P_SELFTSK */
+
+/*
+ *  アラインしているかの判定
+ */
+#define ALIGNED(val, align)		((((uintptr_t)(val)) & ((align) - 1U)) == 0U)
+
+#ifdef CHECK_STKSZ_ALIGN
+#define STKSZ_ALIGN(stksz)		ALIGNED(stksz, CHECK_STKSZ_ALIGN)
+#else /* CHECK_STKSZ_ALIGN */
+#define STKSZ_ALIGN(stksz)		true
+#endif /* CHECK_STKSZ_ALIGN */
+
+#ifdef CHECK_INTPTR_ALIGN
+#define INTPTR_ALIGN(p_var)		ALIGNED(p_var, CHECK_INTPTR_ALIGN)
+#else /* CHECK_INTPTR_ALIGN */
+#define INTPTR_ALIGN(p_var)		true
+#endif /* CHECK_INTPTR_ALIGN */
+
+#ifdef CHECK_FUNC_ALIGN
+#define FUNC_ALIGN(func)		ALIGNED(func, CHECK_FUNC_ALIGN)
+#else /* CHECK_FUNC_ALIGN */
+#define FUNC_ALIGN(func)		true
+#endif /* CHECK_FUNC_ALIGN */
+
+#ifdef CHECK_STACK_ALIGN
+#define STACK_ALIGN(stack)		ALIGNED(stack, CHECK_STACK_ALIGN)
+#else /* CHECK_STACK_ALIGN */
+#define STACK_ALIGN(stack)		true
+#endif /* CHECK_STACK_ALIGN */
+
+#ifdef CHECK_MPF_ALIGN
+#define MPF_ALIGN(mpf)			ALIGNED(mpf, CHECK_MPF_ALIGN)
+#else /* CHECK_MPF_ALIGN */
+#define MPF_ALIGN(mpf)			true
+#endif /* CHECK_MPF_ALIGN */
+
+#ifdef CHECK_MB_ALIGN
+#define MB_ALIGN(mb)			ALIGNED(mb, CHECK_MB_ALIGN)
+#else /* CHECK_MB_ALIGN */
+#define MB_ALIGN(mb)			true
+#endif /* CHECK_MB_ALIGN */
+
+/*
+ *  NULLでないことの判定
+ */
+#ifdef CHECK_FUNC_NONNULL
+#define FUNC_NONNULL(func)		((func) != NULL)
+#else /* CHECK_FUNC_NONNULL */
+#define FUNC_NONNULL(func)		true
+#endif /* CHECK_FUNC_NONNULL */
+
+#ifdef CHECK_INTPTR_NONNULL
+#define INTPTR_NONNULL(p_var)	((p_var) != NULL)
+#else /* CHECK_INTPTR_NONNULL */
+#define INTPTR_NONNULL(p_var)	true
+#endif /* CHECK_INTPTR_NONNULL */
 
 #endif /* TOPPERS_CHECK_H */

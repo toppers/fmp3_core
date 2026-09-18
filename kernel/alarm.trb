@@ -47,6 +47,24 @@
 class AlarmObject < KernelObject
   def initialize()
     super("alm", "alarm")
+    @inibList["T_NFYINFO"] = "aalm_nfyinfo_table"
+  end
+
+  def checkAutoObjid(numAutoObjid)
+    # 動的生成されたアラーム通知はiprcid = TOPPERS_MASTER_PRCID固定で
+    # 生成される（kernel/alarm.cのacre_alm）．マスタプロセッサが時間
+    # イベント処理プロセッサでない構成ではinitialize_alarmが即returnし，
+    # free_almcbがBSSゼロのままacre_almのqueue_delete_nextがNULLを辿る
+    # （段階2最終レビュー Minor 1）．現行5ターゲットではTOPPERS_TEPP_PRC
+    # のbit0が必ず立つため到達しないが，将来ターゲットのための構造的な
+    # 予防としてcfgエラーで弾く．
+    if ($TOPPERS_TEPP_PRC & (1 << ($TOPPERS_MASTER_PRCID - 1))) == 0
+      $cfgData[@aidapi].each do |_, params|
+        error_ercd("E_RSATR", params,
+                   "#{@aidapi} requires the master processor " \
+                   "to be a time event processor")
+      end
+    end
   end
 
   def prepare(key, params)

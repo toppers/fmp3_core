@@ -53,6 +53,18 @@
 #endif /* TNUM_PRCID >= 2 */
 
 /*
+ *  INTNO3 は test/test_dcre5.c（dcre 動的 ISR 回帰テスト）が，syssvc/serial.cfg
+ *  由来の ISR_SIO への依存を解消し自立化するために使う「発火されない静的 ISR
+ *  専用」の予備割込み．INTNO1/INTNO2 と同じ流儀で，未接続の予備 IRQ を PRC1 に
+ *  割り当てる（IRQ60=INTNO1，IRQ61=INTNO_UNOPTED（test/test_dcre5.h で定義・
+ *  意図的に CFG_INT しない），IRQ62=INTNO3）．
+ */
+#define INTNO3			((1U << 16) | (62U + 16U))	/* PRC1, 予備NVIC IRQ62 → INTNO 78 */
+#define INTNO3_INTATR	TA_ENAINT
+#define INTNO3_INTPRI	(-2)
+#define intno3_clear()
+
+/*
  *  コア依存モジュール（ARM-M 用）
  */
 #include "core_test.h"

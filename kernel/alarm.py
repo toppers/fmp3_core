@@ -47,6 +47,21 @@
 class AlarmObject(KernelObject):
     def __init__(self):
         super().__init__("alm", "alarm")
+        self.inibList["T_NFYINFO"] = "aalm_nfyinfo_table"
+
+    def checkAutoObjid(self, numAutoObjid):
+        # 動的生成されたアラーム通知は iprcid = TOPPERS_MASTER_PRCID 固定で
+        # 生成される（kernel/alarm.c の acre_alm）。マスタプロセッサが時間
+        # イベント処理プロセッサでない構成では initialize_alarm が即 return
+        # し、free_almcb が BSS ゼロのまま acre_alm の queue_delete_next が
+        # NULL を辿る（段階2 最終レビュー Minor 1）。現行5ターゲットでは
+        # TOPPERS_TEPP_PRC の bit0 が必ず立つため到達しないが、将来ターゲット
+        # のための構造的な予防として cfg エラーで弾く。
+        if (TOPPERS_TEPP_PRC & (1 << (TOPPERS_MASTER_PRCID - 1))) == 0:
+            for _, params in cfgData[self.aidapi].items():
+                error_ercd("E_RSATR", params,
+                           f"{self.aidapi} requires the master processor "
+                           "to be a time event processor")
 
     def prepare(self, key, params):
         # almatrが無効の場合（E_RSATR）

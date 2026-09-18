@@ -3,8 +3,16 @@ barrier_sync
 exit_kernel
 dispatch_handler
 ext_ker_handler
+mpk_valid
+initialize_mempool
+malloc_mempool
+aligned_alloc_mempool
+free_mempool
 
 # task.c
+free_tcb
+tmax_stskid
+atinib_table
 initialize_task
 search_schedtsk
 update_schedtsk_dsp
@@ -55,10 +63,16 @@ signal_time
 
 # semaphore.c
 initialize_semaphore
+free_semcb
+tmax_ssemid
+aseminib_table
 
 # eventflag.c
 initialize_eventflag
 check_flg_cond
+free_flgcb
+tmax_sflgid
+aflginib_table
 
 # dataqueue.c
 initialize_dataqueue
@@ -68,6 +82,9 @@ dequeue_data
 send_data
 force_send_data
 receive_data
+free_dtqcb
+tmax_sdtqid
+adtqinib_table
 
 # pridataq.c
 initialize_pridataq
@@ -75,6 +92,9 @@ enqueue_pridata
 dequeue_pridata
 send_pridata
 receive_pridata
+free_pdqcb
+tmax_spdqid
+apdqinib_table
 
 # mutex.c
 initialize_mutex
@@ -82,25 +102,46 @@ mutex_check_ceilpri
 mutex_acquire
 mutex_release
 mutex_release_all
+free_mtxcb
+tmax_smtxid
+amtxinib_table
 
 # mempfix.c
 initialize_mempfix
 get_mpf_block
+free_mpfcb
+tmax_smpfid
+ampfinib_table
 
 # spin_lock.c
 initialize_spin_lock
 force_unlock_spin
 
+# time_manage.c
+check_nfyinfo
+notify_handler
+
 # cyclic.c
 initialize_cyclic
 call_cyclic
+free_cyccb
+tmax_scycid
+acycinib_table
+acyc_nfyinfo_table
 
 # alarm.c
 initialize_alarm
 call_alarm
+free_almcb
+tmax_salmid
+aalminib_table
+aalm_nfyinfo_table
 
 # interrupt.c
 initialize_interrupt
+initialize_isr
+call_isr
+free_isrcb
 
 # exception.c
 initialize_exception
@@ -143,6 +184,15 @@ p_cyccb_table
 tmax_almid
 alminib_table
 p_almcb_table
+tmax_isrid
+tmax_sisrid
+isrinib_table
+aisrinib_table
+p_isrcb_table
+isrorder_table
+tnum_isr_queue
+isr_queue_list
+isr_queue_table
 tnum_def_inhno
 inhinib_table
 tnum_cfg_intno
@@ -156,5 +206,7 @@ istk_table
 istkpt_table
 idstk_table
 idstkpt_table
+mpksz
+mpk
 
 INCLUDE "target"

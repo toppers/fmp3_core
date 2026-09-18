@@ -118,11 +118,55 @@ class KernelObject:
         self.objid = obj + "id"
         self.api = "CRE_" + obj.upper()
         self.omit_cb = False
+        self.noobj = "no" + obj
+        self.aidapi = "AID_" + obj.upper()
+        self.inibList = {f"{self.OBJ_S}INIB": f"a{self.obj_s}inib_table"}
+
+    def checkAutoObjid(self, numAutoObjid):
+        """AID_xxx が 1 個以上ある構成に対するオブジェクト種別ごとの追加検査．
+
+        既定では何もしない．cyc/alm だけが「マスタプロセッサが時間イベント
+        処理プロセッサであること」を要求するためオーバライドする
+        （段階2 最終レビュー Minor 1 の hardening）．
+        """
+        pass
 
     def generate(self):
+        # AID_xxx の処理（クラス外専用。ENA_SPRと同じ規約: kernel/task.py:141-142）
+        #
+        # 段階1では kernel_api.def に AID_TSK のみが登録されている（AID_SEM等
+        # は未登録）。cfgDataはkernel_api.def登録済みAPIのみをキーに持つため、
+        # self.aidapiが登録されていないオブジェクト（tsk以外）ではこのブロック
+        # 全体を無効化し、既存の出力（TNUM_S*ID等の新設なし）を厳密に保つ
+        # （段階3で他オブジェクトにもAID_xxxを登録すれば自動的に有効化される）。
+        has_aid = self.aidapi in cfgData
+        numAutoObjid = 0
+        if has_aid:
+            for _, params in cfgData[self.aidapi].items():
+                if "class" in params:
+                    error_ercd("E_RSATR", params,
+                               f"{self.aidapi} must not be within a class")
+                numAutoObjid += int(params[self.noobj])
+        numObjid = len(cfgData[self.api]) + numAutoObjid
+
+        # AID_xxx が 1 個以上あるのに静的オブジェクトが 0 個の構成は、
+        # データ構造生成ガード（下記 len(cfgData[self.api]) > 0）により
+        # CB 実体もアクセステーブルも初期化関数登録も生成されないまま
+        # TNUM_xxxID だけが増える（free-list 未初期化のまま acre される）。
+        # 段階2 ではこれを cfg エラーとして弾く（dcre も同じ穴を持つ）。
+        if numAutoObjid > 0 and len(cfgData[self.api]) == 0:
+            for _, params in cfgData[self.aidapi].items():
+                error_ercd("E_OBJ", params,
+                           f"{self.aidapi} requires at least one "
+                           f"{self.api} in the system")
+
+        # オブジェクト種別ごとの追加検査（既定は no-op）
+        if numAutoObjid > 0:
+            self.checkAutoObjid(numAutoObjid)
+
         # オブジェクトの数のマクロ定義の生成（kernel_cfg.h）
         kernelCfgH.add(f"#define TNUM_{self.OBJ}ID\t"
-                       f"{len(cfgData[self.api])}")
+                       f"{numObjid}")
 
         # オブジェクトのID番号のマクロ定義の生成（kernel_cfg.h）
         for _, params in sorted(cfgData[self.api].items()):
@@ -138,8 +182,19 @@ class KernelObject:
             kernelCfgC.add()
 
         # オブジェクトID番号の最大値
-        kernelCfgC.add2(f"const ID _kernel_tmax_{self.obj}id"
-                        f" = (TMIN_{self.OBJ}ID + TNUM_{self.OBJ}ID - 1);")
+        if has_aid:
+            kernelCfgC.add(f"const ID _kernel_tmax_{self.obj}id"
+                           f" = (TMIN_{self.OBJ}ID + TNUM_{self.OBJ}ID - 1);")
+            kernelCfgC.add(f"#define TNUM_S{self.OBJ}ID\t"
+                           f"{len(cfgData[self.api])}")
+            kernelCfgC.add2(f"const ID _kernel_tmax_s{self.obj}id"
+                            f" = (TMIN_{self.OBJ}ID + TNUM_S{self.OBJ}ID - 1);")
+        else:
+            kernelCfgC.add2(f"const ID _kernel_tmax_{self.obj}id"
+                            f" = (TMIN_{self.OBJ}ID + TNUM_{self.OBJ}ID - 1);")
+
+        # inib_table のサイズトークン（AID登録済みなら静的数のみのサイズへ）
+        inibSizeToken = f"TNUM_S{self.OBJ}ID" if has_aid else f"TNUM_{self.OBJ}ID"
 
         # データ構造
         if len(cfgData[self.api]) > 0:
@@ -161,7 +216,7 @@ class KernelObject:
 
             # オブジェクト初期化ブロックの生成
             kernelCfgC.add(f"const {self.OBJ_S}INIB _kernel_{self.obj_s}inib_table"
-                           f"[TNUM_{self.OBJ}ID] = {{")
+                           f"[{inibSizeToken}] = {{")
             for index, (key, params) in enumerate(
                     sorted(cfgData[self.api].items())):
                 if index > 0:
@@ -177,6 +232,9 @@ class KernelObject:
                         f"static {self.OBJ_S}CB "
                         f"_kernel_{self.obj_s}cb_{params[self.objid]}",
                         SecnameKernelData(params["class"]))
+                for i in range(1, numAutoObjid + 1):
+                    kernelCfgC.add(f"static {self.OBJ_S}CB "
+                                   f"_kernel_a{self.obj_s}cb_{i};")
                 kernelCfgC.add()
 
                 # オブジェクト管理ブロックへのアクセステーブル
@@ -189,6 +247,9 @@ class KernelObject:
                         kernelCfgC.add(",")
                     kernelCfgC.append(
                         f"\t&_kernel_{self.obj_s}cb_{params[self.objid]}")
+                for i in range(1, numAutoObjid + 1):
+                    kernelCfgC.add(",")
+                    kernelCfgC.append(f"\t&_kernel_a{self.obj_s}cb_{i}")
                 kernelCfgC.add()
                 kernelCfgC.add2("};")
 
@@ -203,6 +264,17 @@ class KernelObject:
                 kernelCfgC.add2(
                     f"TOPPERS_EMPTY_LABEL({self.OBJ_S}CB *const, "
                     f"_kernel_p_{self.obj_s}cb_table);")
+
+        # 動的生成オブジェクト用の初期化ブロック（RAM・非const）。
+        # self.aidapiがkernel_api.defに登録されているオブジェクトのみ出力する
+        # （段階1ではAID_TSKのみ登録済み。他オブジェクトは既存出力のまま）。
+        if has_aid:
+            for typ, array in self.inibList.items():
+                if numAutoObjid > 0:
+                    kernelCfgC.add2(f"{typ} _kernel_{array}[{numAutoObjid}];")
+                else:
+                    kernelCfgC.add2(
+                        f"TOPPERS_EMPTY_LABEL({typ}, _kernel_{array});")
 
 
 #
@@ -714,3 +786,34 @@ else:
 kernelCfgH.append("""\
 #endif /* TOPPERS_KERNEL_CFG_H */
 """)
+
+#
+#  カーネルメモリプール領域
+#
+kernelCfgC.comment_header("Kernel Memory Pool Area")
+
+if len(cfgData["DEF_MPK"]) == 0:
+    mpksz = "0"
+    mpk = "NULL"
+else:
+    if len(cfgData["DEF_MPK"]) > 1:
+        error("E_OBJ: too many DEF_MPK")
+    params0 = cfgData["DEF_MPK"][1]
+    if "class" in params0:
+        error_ercd("E_RSATR", params0, "DEF_MPK must not be within a class")
+    params0.setdefault("mpk", "NULL")
+    if params0["mpksz"] == 0:
+        error_wrong("E_PAR", params0, "mpksz", "zero")
+    if params0["mpk"] == "NULL":
+        kernelCfgC.add("static MB_T _kernel_memory_pool"
+                       f"[COUNT_MB_T({params0['mpksz']})];")
+        mpksz = f"ROUND_MB_T({params0['mpksz']})"
+        mpk = "_kernel_memory_pool"
+    else:
+        if (params0["mpksz"] & (CHECK_MB_ALIGN - 1)) != 0:
+            error_wrong("E_PAR", params0, "mpksz", "not aligned")
+        mpksz = f"({params0['mpksz']})"
+        mpk = f"(void *)({params0['mpk']})"
+
+kernelCfgC.add(f"const size_t _kernel_mpksz = {mpksz};")
+kernelCfgC.add2(f"MB_T *const _kernel_mpk = {mpk};")

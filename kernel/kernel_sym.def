@@ -83,6 +83,9 @@ CHECK_STACK_ALIGN,,,defined(CHECK_STACK_ALIGN),1
 CHECK_STACK_NONNULL,true,bool,defined(CHECK_STACK_NONNULL),false
 CHECK_MPF_ALIGN,,,defined(CHECK_MPF_ALIGN),1
 CHECK_MPF_NONNULL,true,bool,defined(CHECK_MPF_NONNULL),false
+CHECK_MPK_ALIGN,,,defined(CHECK_MPK_ALIGN),1
+CHECK_MPK_NONNULL,true,bool,defined(CHECK_MPK_NONNULL),false
+CHECK_MB_ALIGN,,,defined(CHECK_MB_ALIGN),1
 sizeof_void_ptr,sizeof(void*)
 sizeof_uint_t,sizeof(uint_t)
 sizeof_size_t,sizeof(size_t)

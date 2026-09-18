@@ -11,10 +11,18 @@
 #undef exit_kernel
 #undef dispatch_handler
 #undef ext_ker_handler
+#undef mpk_valid
+#undef initialize_mempool
+#undef malloc_mempool
+#undef aligned_alloc_mempool
+#undef free_mempool
 
 /*
  *  task.c
  */
+#undef free_tcb
+#undef tmax_stskid
+#undef atinib_table
 #undef initialize_task
 #undef search_schedtsk
 #undef update_schedtsk_dsp
@@ -33,7 +41,6 @@
  *  taskhook.c
  */
 #undef mtxhook_check_ceilpri
-#undef mtxhook_scan_ceilmtx
 #undef mtxhook_release_all
 
 /*
@@ -74,12 +81,18 @@
  *  semaphore.c
  */
 #undef initialize_semaphore
+#undef free_semcb
+#undef tmax_ssemid
+#undef aseminib_table
 
 /*
  *  eventflag.c
  */
 #undef initialize_eventflag
 #undef check_flg_cond
+#undef free_flgcb
+#undef tmax_sflgid
+#undef aflginib_table
 
 /*
  *  dataqueue.c
@@ -91,6 +104,9 @@
 #undef send_data
 #undef force_send_data
 #undef receive_data
+#undef free_dtqcb
+#undef tmax_sdtqid
+#undef adtqinib_table
 
 /*
  *  pridataq.c
@@ -100,23 +116,30 @@
 #undef dequeue_pridata
 #undef send_pridata
 #undef receive_pridata
+#undef free_pdqcb
+#undef tmax_spdqid
+#undef apdqinib_table
 
 /*
  *  mutex.c
  */
 #undef initialize_mutex
 #undef mutex_check_ceilpri
-#undef mutex_scan_ceilmtx
-#undef mutex_drop_priority
 #undef mutex_acquire
 #undef mutex_release
 #undef mutex_release_all
+#undef free_mtxcb
+#undef tmax_smtxid
+#undef amtxinib_table
 
 /*
  *  mempfix.c
  */
 #undef initialize_mempfix
 #undef get_mpf_block
+#undef free_mpfcb
+#undef tmax_smpfid
+#undef ampfinib_table
 
 /*
  *  spin_lock.c
@@ -125,21 +148,38 @@
 #undef force_unlock_spin
 
 /*
+ *  time_manage.c
+ */
+#undef check_nfyinfo
+#undef notify_handler
+
+/*
  *  cyclic.c
  */
 #undef initialize_cyclic
 #undef call_cyclic
+#undef free_cyccb
+#undef tmax_scycid
+#undef acycinib_table
+#undef acyc_nfyinfo_table
 
 /*
  *  alarm.c
  */
 #undef initialize_alarm
 #undef call_alarm
+#undef free_almcb
+#undef tmax_salmid
+#undef aalminib_table
+#undef aalm_nfyinfo_table
 
 /*
  *  interrupt.c
  */
 #undef initialize_interrupt
+#undef initialize_isr
+#undef call_isr
+#undef free_isrcb
 
 /*
  *  exception.c
@@ -186,6 +226,15 @@
 #undef tmax_almid
 #undef alminib_table
 #undef p_almcb_table
+#undef tmax_isrid
+#undef tmax_sisrid
+#undef isrinib_table
+#undef aisrinib_table
+#undef p_isrcb_table
+#undef isrorder_table
+#undef tnum_isr_queue
+#undef isr_queue_list
+#undef isr_queue_table
 #undef tnum_def_inhno
 #undef inhinib_table
 #undef tnum_cfg_intno
@@ -199,6 +248,8 @@
 #undef istkpt_table
 #undef idstk_table
 #undef idstkpt_table
+#undef mpksz
+#undef mpk
 
 
 #include "target_unrename.h"

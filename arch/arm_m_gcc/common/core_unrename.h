@@ -5,6 +5,12 @@
 #undef TOPPERS_CORE_RENAME_H
 
 /*
+ *  core_kernel_impl.h
+ */
+#undef sense_lock
+#undef unlock_cpu
+
+/*
  *  core_kernel_impl.c
  */
 #undef p_exc_tbl

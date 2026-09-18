@@ -52,6 +52,11 @@
 #ifdef TOPPERS_tskini
 
 /*
+ *  使用していないTCBのリスト（動的生成タスク用，dcre 段階1）
+ */
+QUEUE	free_tcb;
+
+/*
  *  タスク管理モジュールの初期化
  */
 void
@@ -70,7 +75,7 @@ initialize_task(PCB *p_my_pcb)
 	}
 	p_my_pcb->ready_primap = 0U;
 
-	for (i = 0; i < tnum_tsk; i++) {
+	for (i = 0; i < tnum_stsk; i++) {
 		j = INDEX_TSK(torder_table[i]);
 		if (tinib_table[j].iprcid == p_my_pcb->prcid) {
 			p_tcb = p_tcb_table[j];
@@ -84,6 +89,22 @@ initialize_task(PCB *p_my_pcb)
 			if ((p_tcb->p_tinib->tskatr & TA_ACT) != 0U) {
 				make_active(p_my_pcb, p_tcb);
 			}
+		}
+	}
+
+	/*
+	 *  動的生成タスク用のTCBスロットをfree_tcbへ登録する（マスタプロセッサのみ）．
+	 *  動的タスクはPRC1固定（Constraint 4）で，静的ループはtorder_table[TNUM_STSKID]
+	 *  しか走査しないため他プロセッサと競合しない．
+	 */
+	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
+		queue_initialize(&free_tcb);
+		for (i = tnum_stsk, j = 0; i < tnum_tsk; i++, j++) {
+			p_tcb = p_tcb_table[i];
+			atinib_table[j].tskatr = TA_NOEXS;
+			p_tcb->p_tinib = (const TINIB *) &(atinib_table[j]);
+			p_tcb->p_pcb = get_pcb(1);		/* 動的タスクは PRC1 所属（Constraint 4） */
+			queue_insert_prev(&free_tcb, &(p_tcb->task_queue));
 		}
 	}
 }

@@ -297,6 +297,14 @@ extern const ID	torder_table[];
 extern TCB *const	p_tcb_table[];
 
 /*
+ *  動的生成タスク関連（dcre 段階1）
+ */
+extern QUEUE	free_tcb;            /* 使用していないTCBのリスト */
+extern const ID	tmax_stskid;         /* 静的生成タスクのID番号の最大値 */
+extern TINIB	atinib_table[];      /* 動的生成タスクの初期化ブロック（RAM） */
+#define tnum_stsk	((uint_t)(tmax_stskid - TMIN_TSKID + 1))
+
+/*
  *  タスクの数
  */
 #define tnum_tsk	((uint_t)(tmax_tskid - TMIN_TSKID + 1))
@@ -309,8 +317,15 @@ extern TCB *const	p_tcb_table[];
 
 /*
  *  TCBからタスクIDを取り出すためのマクロ
+ *
+ *  動的生成タスク（p_tinib が atinib_table を指す）と静的生成タスク
+ *  （p_tinib が tinib_table を指す）の2レンジに対応する（dcre 段階1）．
  */
-#define	TSKID(p_tcb)	((ID)(((p_tcb)->p_tinib - tinib_table) + TMIN_TSKID))
+#define TSKID(p_tcb) \
+	((((p_tcb)->p_tinib >= atinib_table) \
+		&& ((p_tcb)->p_tinib < &atinib_table[tnum_tsk - tnum_stsk])) \
+	  ? ((ID)(((p_tcb)->p_tinib - atinib_table) + TMIN_TSKID + tnum_stsk)) \
+	  : ((ID)(((p_tcb)->p_tinib - tinib_table) + TMIN_TSKID)))
 
 /*
  *  タスク管理モジュールの初期化

@@ -47,12 +47,12 @@
 #
 #  kernel_cfg.hの生成
 #
-$kernelCfgH.add("#define TNUM_ISRID\t#{$cfgData[:CRE_ISR].size}")
-
-$cfgData[:CRE_ISR].sort.each do |_, params|
-  $kernelCfgH.add("#define #{params[:isrid]}\t#{params[:isrid].val}")
-end
-$kernelCfgH.add()
+#  ★TNUM_ISRID と各ISRIDのマクロ定義は，本ファイル末尾の IsrObject.new.generate()
+#  が共通枠組み（kernel/kernel.trb）として出力する．ISRがランタイムオブジェクトに
+#  なったため，他のオブジェクト種別と同じ枠組みに載せた．本ファイルが
+#  $kernelCfgH へ書くのはこの1箇所だけなので，出力位置が末尾へ移動しても
+#  kernel_cfg.h の内容は変わらない（Task 2 Step 12 で実証する）．
+#
 
 #
 #  kernel_cfg.cの生成
@@ -408,6 +408,128 @@ $cfgData[:CRE_ISR].sort.each do |_, params|
   end
 end
 
+#
+#  動的ISR生成の対象とする割込み番号（ENA_DYNISR）に関するエラーチェック
+#
+#  ★このループは，下のインライン連鎖生成ループより前に置かなければならない．
+#  生成ループは$cfgData[:DEF_INH]へ「生成した割込みハンドラのDEF_INH相当」を
+#  追加するので，後に置くと自分が生成したDEF_INHを競合とみなしてしまう
+#  （CRE_ISRの同じ検査が:374-381で生成ループより前に置かれているのと同じ理由）．
+#
+dynIsrList = []
+$cfgData[:ENA_DYNISR].each do |_, params|
+  # クラスの囲みの中に記述されていない場合（E_RSATR）
+  #
+  #  ENA_DYNISRはCFG_INT・CRE_ISRと同じくクラス内APIである（AID_ISRだけが
+  #  クラス外専用）．対象の割込み要求ラインが属するクラスを指定させることで，
+  #  動的ISRを実行するプロセッサ集合がCFG_INTと一致することを保証する．
+  if !params.has_key?(:class)
+    error_ercd("E_RSATR", params, "%apiname must be within a class")
+    params[:class] = $TCLS_ERROR
+    next
+  end
+
+  # intnoが有効範囲外の場合（E_PAR）
+  if !$INTNO_CREISR_VALID_ALL.include?(params[:intno])
+    error_illegal("E_PAR", params, "intno")
+    next
+  end
+
+  # intnoに対するCFG_INTがない場合（E_OBJ）
+  if !$cfgData[:CFG_INT].has_key?(params[:intno])
+    error_ercd("E_OBJ", params, "%%intno in %apiname " \
+                                    "is not configured with CFG_INT")
+    next
+  end
+
+  intnoParams = $cfgData[:CFG_INT][params[:intno]]
+
+  # CFG_INTとENA_DYNISRが異なるクラスの囲みの中にある場合（E_RSATR）
+  if params[:class] != intnoParams[:class]
+    error_ercd("E_RSATR", params, "%%intno in %apiname " \
+                            "does not belong to the same class with CFG_INT")
+    next
+  end
+
+  # intnoでカーネル管理外の割込みを指定した場合（E_OBJ）
+  if intnoParams[:intpri] < $TMIN_INTPRI
+    error_ercd("E_OBJ", params, "interrupt service routine cannot handle " \
+                                "non-kernel interrupt in %apiname of %%intno")
+    next
+  end
+
+  # intnoに対応するinhnoに対してDEF_INHがある場合（E_OBJ）
+  conflict = false
+  $clsData[params[:class]][:affinityPrcList].each do |prcid|
+    inhnoVal = $toInhnoVal[prcid][params[:intno].val]
+    if $cfgData[:DEF_INH].has_key?(inhnoVal)
+      error_ercd("E_OBJ", params, "%%intno in %apiname is duplicated " \
+                        "with inhno #{$cfgData[:DEF_INH][inhnoVal][:inhno]}")
+      conflict = true
+    end
+  end
+  next if conflict
+
+  dynIsrList.push(params[:intno].val)
+end
+
+dynIsrList.sort!
+
+# ENA_DYNISRが1個以上あるのに静的なCRE_ISRが0個の構成は，共通枠組みが
+# initialize_isrの登録を$cfgData[@api].size > 0に条件づけているため
+# （kernel/kernel.trb:213,274-275），isr_queue_tableが未初期化のまま
+# call_isrが走ることになる．cfgエラーで弾く．
+if dynIsrList.size > 0 && $cfgData[:CRE_ISR].size == 0
+  $cfgData[:ENA_DYNISR].each do |_, params|
+    error_ercd("E_OBJ", params,
+               "%apiname requires at least one CRE_ISR in the system")
+  end
+end
+
+# AID_ISRが1個以上あるのにENA_DYNISRが0個の構成は，適格なintnoが1つも無い
+# ためacre_isrが必ずE_OBJで失敗し，予約したISRCBが死蔵される．cfgエラーで弾く．
+numAutoIsrid = 0
+$cfgData[:AID_ISR].each do |_, params|
+  numAutoIsrid += params[:noisr]
+end
+if numAutoIsrid > 0 && dynIsrList.size == 0
+  $cfgData[:AID_ISR].each do |_, params|
+    error_ercd("E_OBJ", params,
+               "AID_ISR requires at least one ENA_DYNISR in the system")
+  end
+end
+
+#
+#  割込みサービスルーチン呼出しキューのデータ構造
+#
+#  ★dcre（interrupt.trb:263-294）は「CFG_INTがありDEF_INHが競合しない全intno」に
+#  キューを作るが，FMP3はENA_DYNISRで明示されたintnoにだけ作る（案B-2）．
+#  これにより，ENA_DYNISRの無い構成ではキュー表が空になり，割込みハンドラの
+#  生成も従来のインライン連鎖のままになる．
+#
+$isrQueueHeader = {}
+dynIsrList.each_with_index do |intnoVal, index|
+  $isrQueueHeader[intnoVal] = "&(_kernel_isr_queue_table[#{index}])"
+end
+
+$kernelCfgC.add2("const uint_t _kernel_tnum_isr_queue = #{dynIsrList.size};")
+
+if dynIsrList.size > 0
+  $kernelCfgC.add("const ISR_ENTRY _kernel_isr_queue_list" \
+                                        "[#{dynIsrList.size}] = {")
+  dynIsrList.each_with_index do |intnoVal, index|
+    $kernelCfgC.add(",") if index > 0
+    $kernelCfgC.append("\t{ #{intnoVal}, #{$isrQueueHeader[intnoVal]} }")
+  end
+  $kernelCfgC.add
+  $kernelCfgC.add2("};")
+  $kernelCfgC.add2("ISRQCB _kernel_isr_queue_table[#{dynIsrList.size}];")
+else
+  $kernelCfgC.add("TOPPERS_EMPTY_LABEL(const ISR_ENTRY, " \
+                                        "_kernel_isr_queue_list);")
+  $kernelCfgC.add2("TOPPERS_EMPTY_LABEL(ISRQCB, _kernel_isr_queue_table);")
+end
+
 isr_flag = {}
 1.upto($TNUM_PRCID) do |prcid|
   $INTNO_CREISR_VALID[prcid].each do |intnoVal|
@@ -417,6 +539,37 @@ isr_flag = {}
       if params[:intno] == intnoVal
         isrParamsList.push(params)
       end
+    end
+
+    # ★動的ISR生成の対象（ENA_DYNISR）とされた割込み番号
+    #
+    #  静的なCRE_ISRが1本も無くてもキュー方式の割込みハンドラを生成する
+    #  （動的生成専用の割込み番号がありうるため）．クラスはCFG_INTから
+    #  取る．静的ISRがある場合も同じ値になる（CRE_ISRとCFG_INTが同一
+    #  クラスであることは:390-394のE_RSATR検査が保証している）．
+    if $isrQueueHeader.has_key?(intnoVal)
+      clsid = $cfgData[:CFG_INT][intnoVal][:class]
+
+      # 割込みを受け付けるプロセッサでない場合はスキップ
+      next if !$clsData[clsid][:affinityPrcList].include?(prcid)
+
+      inhnoVal = $toInhnoVal[prcid][intnoVal]
+      $cfgData[:DEF_INH][inhnoVal] = {
+        inhno: NumStr.new(inhnoVal),
+        inhatr: NumStr.new($TA_NULL, "TA_NULL"),
+        inthdr: "_kernel_inthdr_#{intnoVal}",
+        class: clsid
+      }
+
+      if (!isr_flag[intnoVal])
+        $kernelCfgC.add("void")
+        $kernelCfgC.add("_kernel_inthdr_#{intnoVal}(void)")
+        $kernelCfgC.add("{")
+        $kernelCfgC.add("\t_kernel_call_isr(#{$isrQueueHeader[intnoVal]});")
+        $kernelCfgC.add2("}")
+        isr_flag[intnoVal] = true
+      end
+      next
     end
 
     # 割込み番号intnoValに対して登録されたISRが存在する場合
@@ -474,6 +627,56 @@ isr_flag = {}
       end
     end
   end
+end
+
+#
+#  割込みサービスルーチンに関する一般的な情報の生成
+#
+class IsrObject < KernelObject
+  def initialize()
+    super("isr", "isr")
+  end
+
+  def prepare(key, params)
+    # エラーチェックは実施済みなので，ここでの処理は不要
+  end
+
+  def generateInib(key, params)
+    # ENA_DYNISRされていない割込み番号のISRはキューに登録されない．
+    # インライン連鎖から直接呼ばれるため，p_isr_queueはNULLでよい
+    # （initialize_isrがNULLを見てenqueueを省く）．
+    p_isr_queue = $isrQueueHeader.fetch(params[:intno].val, "NULL")
+    return("(#{params[:isratr]}), (EXINF)(#{params[:exinf]}), " \
+                        "(#{p_isr_queue}), " \
+                        "(ISR)(#{params[:isr]}), (#{params[:isrpri]})")
+  end
+end
+IsrObject.new.generate()
+
+#
+#  割込みサービスルーチン生成順序テーブルの生成
+#
+#  ★dcre（interrupt.trb:338-346）は挿入順（.cfgの記述順）で生成し，
+#  TNUM_SISRIDが0のときのガードも持たない．FMP3では2点を変える．
+#
+#  (1) isrid昇順にする．initialize_isrはこの順にenqueue_isrし，enqueue_isrは
+#      「自分より真に大きいisrpriの直前」に挿入するので，キューの並びは
+#      「isrid昇順を基底とするisrpriの安定ソート」になる．これはインライン
+#      連鎖の呼出し順序と完全に同じである．ENA_DYNISRを足したり外したりしても
+#      同じ.cfgの呼出し順序が変わらないことを保証するために，こちらを合わせる．
+#  (2) 静的ISRが0個のときはTOPPERS_EMPTY_LABELにする（[0]配列を作らない）．
+#
+if $cfgData[:CRE_ISR].size > 0
+  $kernelCfgC.add("const ID _kernel_isrorder_table[TNUM_SISRID] = { ")
+  $kernelCfgC.append("\t")
+  $cfgData[:CRE_ISR].sort.each_with_index do |(_, params), index|
+    $kernelCfgC.append(", ") if index > 0
+    $kernelCfgC.append("#{params[:isrid]}")
+  end
+  $kernelCfgC.add
+  $kernelCfgC.add2("};")
+else
+  $kernelCfgC.add2("TOPPERS_EMPTY_LABEL(const ID, _kernel_isrorder_table);")
 end
 
 #

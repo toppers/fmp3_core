@@ -10,10 +10,18 @@
 #define exit_kernel					_kernel_exit_kernel
 #define dispatch_handler			_kernel_dispatch_handler
 #define ext_ker_handler				_kernel_ext_ker_handler
+#define mpk_valid					_kernel_mpk_valid
+#define initialize_mempool			_kernel_initialize_mempool
+#define malloc_mempool				_kernel_malloc_mempool
+#define aligned_alloc_mempool		_kernel_aligned_alloc_mempool
+#define free_mempool				_kernel_free_mempool
 
 /*
  *  task.c
  */
+#define free_tcb					_kernel_free_tcb
+#define tmax_stskid					_kernel_tmax_stskid
+#define atinib_table				_kernel_atinib_table
 #define initialize_task				_kernel_initialize_task
 #define search_schedtsk				_kernel_search_schedtsk
 #define update_schedtsk_dsp			_kernel_update_schedtsk_dsp
@@ -32,7 +40,6 @@
  *  taskhook.c
  */
 #define mtxhook_check_ceilpri		_kernel_mtxhook_check_ceilpri
-#define mtxhook_scan_ceilmtx		_kernel_mtxhook_scan_ceilmtx
 #define mtxhook_release_all			_kernel_mtxhook_release_all
 
 /*
@@ -73,12 +80,18 @@
  *  semaphore.c
  */
 #define initialize_semaphore		_kernel_initialize_semaphore
+#define free_semcb					_kernel_free_semcb
+#define tmax_ssemid					_kernel_tmax_ssemid
+#define aseminib_table				_kernel_aseminib_table
 
 /*
  *  eventflag.c
  */
 #define initialize_eventflag		_kernel_initialize_eventflag
 #define check_flg_cond				_kernel_check_flg_cond
+#define free_flgcb					_kernel_free_flgcb
+#define tmax_sflgid					_kernel_tmax_sflgid
+#define aflginib_table				_kernel_aflginib_table
 
 /*
  *  dataqueue.c
@@ -90,6 +103,9 @@
 #define send_data					_kernel_send_data
 #define force_send_data				_kernel_force_send_data
 #define receive_data				_kernel_receive_data
+#define free_dtqcb					_kernel_free_dtqcb
+#define tmax_sdtqid					_kernel_tmax_sdtqid
+#define adtqinib_table				_kernel_adtqinib_table
 
 /*
  *  pridataq.c
@@ -99,23 +115,30 @@
 #define dequeue_pridata				_kernel_dequeue_pridata
 #define send_pridata				_kernel_send_pridata
 #define receive_pridata				_kernel_receive_pridata
+#define free_pdqcb					_kernel_free_pdqcb
+#define tmax_spdqid					_kernel_tmax_spdqid
+#define apdqinib_table				_kernel_apdqinib_table
 
 /*
  *  mutex.c
  */
 #define initialize_mutex			_kernel_initialize_mutex
 #define mutex_check_ceilpri			_kernel_mutex_check_ceilpri
-#define mutex_scan_ceilmtx			_kernel_mutex_scan_ceilmtx
-#define mutex_drop_priority			_kernel_mutex_drop_priority
 #define mutex_acquire				_kernel_mutex_acquire
 #define mutex_release				_kernel_mutex_release
 #define mutex_release_all			_kernel_mutex_release_all
+#define free_mtxcb					_kernel_free_mtxcb
+#define tmax_smtxid					_kernel_tmax_smtxid
+#define amtxinib_table				_kernel_amtxinib_table
 
 /*
  *  mempfix.c
  */
 #define initialize_mempfix			_kernel_initialize_mempfix
 #define get_mpf_block				_kernel_get_mpf_block
+#define free_mpfcb					_kernel_free_mpfcb
+#define tmax_smpfid					_kernel_tmax_smpfid
+#define ampfinib_table				_kernel_ampfinib_table
 
 /*
  *  spin_lock.c
@@ -124,21 +147,38 @@
 #define force_unlock_spin			_kernel_force_unlock_spin
 
 /*
+ *  time_manage.c
+ */
+#define check_nfyinfo				_kernel_check_nfyinfo
+#define notify_handler				_kernel_notify_handler
+
+/*
  *  cyclic.c
  */
 #define initialize_cyclic			_kernel_initialize_cyclic
 #define call_cyclic					_kernel_call_cyclic
+#define free_cyccb					_kernel_free_cyccb
+#define tmax_scycid					_kernel_tmax_scycid
+#define acycinib_table				_kernel_acycinib_table
+#define acyc_nfyinfo_table			_kernel_acyc_nfyinfo_table
 
 /*
  *  alarm.c
  */
 #define initialize_alarm			_kernel_initialize_alarm
 #define call_alarm					_kernel_call_alarm
+#define free_almcb					_kernel_free_almcb
+#define tmax_salmid					_kernel_tmax_salmid
+#define aalminib_table				_kernel_aalminib_table
+#define aalm_nfyinfo_table			_kernel_aalm_nfyinfo_table
 
 /*
  *  interrupt.c
  */
 #define initialize_interrupt		_kernel_initialize_interrupt
+#define initialize_isr				_kernel_initialize_isr
+#define call_isr					_kernel_call_isr
+#define free_isrcb					_kernel_free_isrcb
 
 /*
  *  exception.c
@@ -185,6 +225,15 @@
 #define tmax_almid					_kernel_tmax_almid
 #define alminib_table				_kernel_alminib_table
 #define p_almcb_table				_kernel_p_almcb_table
+#define tmax_isrid					_kernel_tmax_isrid
+#define tmax_sisrid					_kernel_tmax_sisrid
+#define isrinib_table				_kernel_isrinib_table
+#define aisrinib_table				_kernel_aisrinib_table
+#define p_isrcb_table				_kernel_p_isrcb_table
+#define isrorder_table				_kernel_isrorder_table
+#define tnum_isr_queue				_kernel_tnum_isr_queue
+#define isr_queue_list				_kernel_isr_queue_list
+#define isr_queue_table				_kernel_isr_queue_table
 #define tnum_def_inhno				_kernel_tnum_def_inhno
 #define inhinib_table				_kernel_inhinib_table
 #define tnum_cfg_intno				_kernel_tnum_cfg_intno
@@ -198,6 +247,8 @@
 #define istkpt_table				_kernel_istkpt_table
 #define idstk_table					_kernel_idstk_table
 #define idstkpt_table				_kernel_idstkpt_table
+#define mpksz						_kernel_mpksz
+#define mpk							_kernel_mpk
 
 
 #include "target_rename.h"

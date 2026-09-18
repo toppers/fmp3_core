@@ -101,11 +101,6 @@
 #endif /* LOG_REF_MTX_LEAVE */
 
 /*
- *  ミューテックスの数
- */
-#define tnum_mtx	((uint_t)(tmax_mtxid - TMIN_MTXID + 1))
-
-/*
  *  ミューテックスIDからミューテックス管理ブロックを取り出すためのマクロ
  */
 #define INDEX_MTX(mtxid)	((uint_t)((mtxid) - TMIN_MTXID))
@@ -123,21 +118,51 @@
  */
 #ifdef TOPPERS_mtxini
 
+/*
+ *  使用していないミューテックス管理ブロックのリスト
+ *
+ *  MTXCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する．acre_mtxは取り出した直後に
+ *  queue_initializeで作り直すため，TA_TPRI（優先度順待ちキュー）と
+ *  干渉しない．
+ */
+QUEUE	free_mtxcb;
+
 void
 initialize_mutex(PCB *p_my_pcb)
 {
-	uint_t	i;
+	uint_t	i, j;
 	MTXCB	*p_mtxcb;
+	MTXINIB	*p_mtxinib;
 
 	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
 		mtxhook_check_ceilpri = mutex_check_ceilpri;
 		mtxhook_release_all = mutex_release_all;
 
-		for (i = 0; i < tnum_mtx; i++) {
+		for (i = 0; i < tnum_smtx; i++) {
 			p_mtxcb = p_mtxcb_table[i];
 			queue_initialize(&(p_mtxcb->wait_queue));
 			p_mtxcb->p_mtxinib = &(mtxinib_table[i]);
 			p_mtxcb->p_loctsk = NULL;
+		}
+
+		/*
+		 *  動的生成用スロットの初期化
+		 *
+		 *  ミューテックスはプロセッサ親和を持たない（MTXINIBに
+		 *  iprcid/affinityが無く，MTXCBにp_pcbが無い）ため，段階2の
+		 *  cyc/almのようなプロセッサ判定や充填は一切不要である．本関数は
+		 *  元からマスタプロセッサ限定なので，そのブロックの中で続けて
+		 *  初期化する．他プロセッサへの可視性は，本関数の呼出し後の
+		 *  barrier_syncが保証する（段階1のfree_tcbと同じ論証）．
+		 */
+		queue_initialize(&free_mtxcb);
+		for (j = 0; i < tnum_mtx; i++, j++) {
+			p_mtxcb = p_mtxcb_table[i];
+			p_mtxinib = &(amtxinib_table[j]);
+			p_mtxinib->mtxatr = TA_NOEXS;
+			p_mtxcb->p_mtxinib = ((const MTXINIB *) p_mtxinib);
+			queue_insert_prev(&free_mtxcb, &(p_mtxcb->wait_queue));
 		}
 	}
 }
@@ -357,6 +382,157 @@ mutex_release_all(PCB *p_my_pcb, TCB *p_tcb)
 #endif /* TOPPERS_mtxrela */
 
 /*
+ *  ミューテックスの生成［NGKI2022］
+ */
+#ifdef TOPPERS_acre_mtx
+
+#ifndef LOG_ACRE_MTX_ENTER
+#define LOG_ACRE_MTX_ENTER(pk_cmtx)
+#endif /* LOG_ACRE_MTX_ENTER */
+
+#ifndef LOG_ACRE_MTX_LEAVE
+#define LOG_ACRE_MTX_LEAVE(ercd)
+#endif /* LOG_ACRE_MTX_LEAVE */
+
+ER_ID
+acre_mtx(const T_CMTX *pk_cmtx)
+{
+	MTXCB	*p_mtxcb;
+	MTXINIB	*p_mtxinib;
+	ATR		mtxatr;
+	PRI		ceilpri;
+	ER		ercd;
+
+	LOG_ACRE_MTX_ENTER(pk_cmtx);
+	CHECK_TSKCTX_UNL();							/*［NGKI2023］［NGKI2024］*/
+
+	mtxatr = pk_cmtx->mtxatr;
+	ceilpri = pk_cmtx->ceilpri;
+
+	if (mtxatr == TA_CEILING) {
+		CHECK_PAR(VALID_TPRI(ceilpri));			/*［NGKI2037］*/
+	}
+	else {
+		CHECK_VALIDATR(mtxatr, TA_TPRI);		/*［NGKI2025］*/
+	}
+
+	lock_cpu();
+	acquire_glock();
+	if (tnum_mtx == tnum_smtx || queue_empty(&free_mtxcb)) {
+		ercd = E_NOID;							/*［NGKI2031］*/
+	}
+	else {
+		p_mtxcb = ((MTXCB *) queue_delete_next(&free_mtxcb));
+		p_mtxinib = (MTXINIB *)(p_mtxcb->p_mtxinib);
+		p_mtxinib->mtxatr = mtxatr;
+		p_mtxinib->ceilpri = INT_PRIORITY(ceilpri);
+
+		queue_initialize(&(p_mtxcb->wait_queue));
+		p_mtxcb->p_loctsk = NULL;				/*［NGKI2033］*/
+		ercd = MTXID(p_mtxcb);
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_MTX_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_mtx */
+
+/*
+ *  ミューテックスの削除［NGKI2056］
+ */
+#ifdef TOPPERS_del_mtx
+
+#ifndef LOG_DEL_MTX_ENTER
+#define LOG_DEL_MTX_ENTER(mtxid)
+#endif /* LOG_DEL_MTX_ENTER */
+
+#ifndef LOG_DEL_MTX_LEAVE
+#define LOG_DEL_MTX_LEAVE(ercd)
+#endif /* LOG_DEL_MTX_LEAVE */
+
+ER
+del_mtx(ID mtxid)
+{
+	MTXCB	*p_mtxcb;
+	MTXINIB	*p_mtxinib;
+	TCB		*p_loctsk;
+	ER		ercd;
+	TCB		*p_selftsk;
+	PCB		*p_my_pcb;
+
+	LOG_DEL_MTX_ENTER(mtxid);
+	CHECK_TSKCTX_UNL_MYSTATE(&p_selftsk);		/*［NGKI2057］［NGKI2058］*/
+	CHECK_ID(VALID_MTXID(mtxid));				/*［NGKI2059］*/
+	p_mtxcb = get_mtxcb(mtxid);
+
+	lock_cpu();
+	acquire_glock();
+	p_my_pcb = get_my_pcb();
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;							/*［NGKI2060］*/
+	}
+	else if (mtxid <= tmax_smtxid) {
+		ercd = E_OBJ;							/*［NGKI2062］*/
+	}
+	else {
+		/*
+		 *  待ちタスクがいても削除は成功し，待ちタスクはE_DLTで強制
+		 *  解除される［NGKI2065］．init_wait_queueはMP対応済み
+		 *  （wait.c:215-228）で，既存のini_mtxと同一の機構である．
+		 */
+		init_wait_queue(p_my_pcb, &(p_mtxcb->wait_queue));
+
+		/*
+		 *  ロック中でも削除できる．p_loctskがロックしているミューテッ
+		 *  クスのリストから対象ミューテックスを削除し，優先度上限
+		 *  ミューテックスなら現在優先度を復帰させる［NGKI2064］．
+		 *  呼出し順・引数はFMP3の現物ini_mtx（mutex.c:605-614）に
+		 *  合わせている（MP版のmutex_drop_priorityはp_my_pcbが先頭）．
+		 *
+		 *  ★MTX_CEILING(p_mtxcb)はmtxatrをMTXPROTO_MASK(0x03)でマスクした
+		 *    値の比較であり，TA_NOEXS(=-1)もマスク後はTA_CEILINGに一致して
+		 *    しまう．先にmtxatrへTA_NOEXSを書くと，非ceilingミューテックス
+		 *    まで含めてstaleなceilpriでmutex_drop_priority経路に入って
+		 *    しまうため，優先度復帰（ceiling判定を含む）をTA_NOEXS書込み
+		 *    より前に行う．
+		 */
+		p_loctsk = p_mtxcb->p_loctsk;
+		if (p_loctsk != NULL) {
+			p_mtxcb->p_loctsk = NULL;
+			(void) remove_mutex(p_loctsk, p_mtxcb);
+			if (MTX_CEILING(p_mtxcb)) {
+				mutex_drop_priority(p_my_pcb, p_loctsk,
+										p_mtxcb->p_mtxinib->ceilpri);
+			}
+		}
+
+		p_mtxinib = (MTXINIB *)(p_mtxcb->p_mtxinib);
+		p_mtxinib->mtxatr = TA_NOEXS;			/*［NGKI2063］*/
+		queue_insert_prev(&free_mtxcb, &(p_mtxcb->wait_queue));
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
+	release_glock();
+  unlock_and_exit:
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_MTX_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_mtx */
+
+/*
  *  ミューテックスのロック
  */
 #ifdef TOPPERS_loc_mtx
@@ -377,7 +553,10 @@ loc_mtx(ID mtxid)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (MTX_CEILING(p_mtxcb)
@@ -436,7 +615,10 @@ ploc_mtx(ID mtxid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (MTX_CEILING(p_mtxcb)
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (MTX_CEILING(p_mtxcb)
 				&& p_selftsk->bpriority < p_mtxcb->p_mtxinib->ceilpri) {
 		ercd = E_ILUSE;
 	}
@@ -488,7 +670,10 @@ tloc_mtx(ID mtxid, TMO tmout)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if (MTX_CEILING(p_mtxcb)
@@ -551,7 +736,10 @@ unl_mtx(ID mtxid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_mtxcb != p_selftsk->p_lastmtx) {
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_mtxcb != p_selftsk->p_lastmtx) {
 		ercd = E_OBJ;
 	}
 	else {
@@ -602,23 +790,28 @@ ini_mtx(ID mtxid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	init_wait_queue(p_my_pcb, &(p_mtxcb->wait_queue));
-	p_loctsk = p_mtxcb->p_loctsk;
-	if (p_loctsk != NULL) {
-		p_mtxcb->p_loctsk = NULL;
-		(void) remove_mutex(p_loctsk, p_mtxcb);
-		if (MTX_CEILING(p_mtxcb)) {
-			mutex_drop_priority(p_my_pcb, p_loctsk,
-									p_mtxcb->p_mtxinib->ceilpri);
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		init_wait_queue(p_my_pcb, &(p_mtxcb->wait_queue));
+		p_loctsk = p_mtxcb->p_loctsk;
+		if (p_loctsk != NULL) {
+			p_mtxcb->p_loctsk = NULL;
+			(void) remove_mutex(p_loctsk, p_mtxcb);
+			if (MTX_CEILING(p_mtxcb)) {
+				mutex_drop_priority(p_my_pcb, p_loctsk,
+										p_mtxcb->p_mtxinib->ceilpri);
+			}
 		}
-	}
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		release_glock();
-		dispatch();
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
 		ercd = E_OK;
-		goto unlock_and_exit;
 	}
-	ercd = E_OK;
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -648,10 +841,15 @@ ref_mtx(ID mtxid, T_RMTX *pk_rmtx)
 
 	lock_cpu();
 	acquire_glock();
-	pk_rmtx->htskid = (p_mtxcb->p_loctsk != NULL) ? TSKID(p_mtxcb->p_loctsk)
-													: TSK_NONE;
-	pk_rmtx->wtskid = wait_tskid(&(p_mtxcb->wait_queue));
-	ercd = E_OK;
+	if (p_mtxcb->p_mtxinib->mtxatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		pk_rmtx->htskid = (p_mtxcb->p_loctsk != NULL) ? TSKID(p_mtxcb->p_loctsk)
+														: TSK_NONE;
+		pk_rmtx->wtskid = wait_tskid(&(p_mtxcb->wait_queue));
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 

@@ -1,3 +1,7 @@
+# core_kernel_impl.h
+sense_lock
+unlock_cpu
+
 # core_kernel_impl.c
 p_exc_tbl
 p_vector_table

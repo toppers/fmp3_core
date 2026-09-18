@@ -97,6 +97,16 @@ typedef struct pridataq_control_block {
  *  優先度データキューIDの最大値（kernel_cfg.c）
  */
 extern const ID	tmax_pdqid;
+extern const ID	tmax_spdqid;		/* 静的生成優先度データキューのID番号の最大値 */
+
+/*
+ *  使用していない優先度データキュー管理ブロックのリスト（pridataq.c）
+ *
+ *  PDQCBの先頭フィールドがQUEUE（swait_queue）なので，そのまま
+ *  free-listのリンクに流用する（dcre pridataq.c:177-183 と同一）．
+ *  段階2のcyc/almで用いたtmevtb領域のオーバレイは不要である．
+ */
+extern QUEUE	free_pdqcb;
 
 /*
  *  優先度データキュー初期化ブロックのエリア（kernel_cfg.c）
@@ -104,16 +114,40 @@ extern const ID	tmax_pdqid;
 extern const PDQINIB	pdqinib_table[];
 
 /*
+ *  動的生成優先度データキューの初期化ブロックのエリア（kernel_cfg.c・RAM）
+ */
+extern PDQINIB	apdqinib_table[];
+
+/*
  *  優先度データキュー管理ブロックのエリアへのポインタテーブル（kernel_cfg.c）
  */
 extern PDQCB *const	p_pdqcb_table[];
 
 /*
+ *  優先度データキューの数
+ *
+ *  PDQIDマクロから参照するためpridataq.cから移設した．
+ */
+#define tnum_pdq	((uint_t)(tmax_pdqid - TMIN_PDQID + 1))
+#define tnum_spdq	((uint_t)(tmax_spdqid - TMIN_PDQID + 1))
+
+/*
  *  優先度データキュー管理ブロックから優先度データキューIDを取り出すた
  *  めのマクロ
+ *
+ *  FMP3のPDQCBはポインタ表（p_pdqcb_table）経由で参照される個別の
+ *  named staticであり，PDQCB自身の配列位置から番号を引けない．元から
+ *  PDQINIBへのポインタ差分で求めていた式を，動的生成優先度データキュー
+ *  （p_pdqinibがapdqinib_tableを指す）と静的生成優先度データキュー
+ *  （p_pdqinibがpdqinib_tableを指す）の2レンジに拡張する
+ *  （段階2のCYCID・段階3aのSEMIDと同型）．AID_PDQが無い構成では
+ *  tnum_pdq == tnum_spdqとなり第1項が常に偽＝従来と同一の式に落ちる．
  */
-#define	PDQID(p_pdqcb)	((ID)(((p_pdqcb)->p_pdqinib - pdqinib_table) \
-															+ TMIN_PDQID))
+#define	PDQID(p_pdqcb) \
+	((((p_pdqcb)->p_pdqinib >= apdqinib_table) \
+		&& ((p_pdqcb)->p_pdqinib < &apdqinib_table[tnum_pdq - tnum_spdq])) \
+	  ? ((ID)(((p_pdqcb)->p_pdqinib - apdqinib_table) + TMIN_PDQID + tnum_spdq)) \
+	  : ((ID)(((p_pdqcb)->p_pdqinib - pdqinib_table) + TMIN_PDQID)))
 
 /*
  *  優先度データキュー機能の初期化

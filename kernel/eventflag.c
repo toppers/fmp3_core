@@ -110,11 +110,6 @@
 #endif /* LOG_REF_FLG_LEAVE */
 
 /*
- *  イベントフラグの数
- */
-#define tnum_flg	((uint_t)(tmax_flgid - TMIN_FLGID + 1))
-
-/*
  *  イベントフラグIDからイベントフラグ管理ブロックを取り出すためのマクロ
  */
 #define INDEX_FLG(flgid)	((uint_t)((flgid) - TMIN_FLGID))
@@ -125,18 +120,48 @@
  */
 #ifdef TOPPERS_flgini
 
+/*
+ *  使用していないイベントフラグ管理ブロックのリスト
+ *
+ *  FLGCBの先頭フィールドがQUEUE（wait_queue）なので，そのまま
+ *  free-listのリンクに流用する．acre_flgは取り出した直後に
+ *  queue_initializeで作り直すため，TA_TPRI（優先度順待ちキュー）と
+ *  干渉しない．
+ */
+QUEUE	free_flgcb;
+
 void
 initialize_eventflag(PCB *p_my_pcb)
 {
-	uint_t	i;
+	uint_t	i, j;
 	FLGCB	*p_flgcb;
+	FLGINIB	*p_flginib;
 
 	if (p_my_pcb->prcid == TOPPERS_MASTER_PRCID) {
-		for (i = 0; i < tnum_flg; i++) {
+		for (i = 0; i < tnum_sflg; i++) {
 			p_flgcb = p_flgcb_table[i];
 			queue_initialize(&(p_flgcb->wait_queue));
 			p_flgcb->p_flginib = &(flginib_table[i]);
 			p_flgcb->flgptn = p_flgcb->p_flginib->iflgptn;
+		}
+
+		/*
+		 *  動的生成用スロットの初期化
+		 *
+		 *  イベントフラグはプロセッサ親和を持たない（FLGINIBに
+		 *  iprcid/affinityが無く，FLGCBにp_pcbが無い）ため，段階2の
+		 *  cyc/almのようなプロセッサ判定や充填は一切不要である．本関数は
+		 *  元からマスタプロセッサ限定なので，そのブロックの中で続けて
+		 *  初期化する．他プロセッサへの可視性は，本関数の呼出し後の
+		 *  barrier_syncが保証する（段階1のfree_tcbと同じ論証）．
+		 */
+		queue_initialize(&free_flgcb);
+		for (j = 0; i < tnum_flg; i++, j++) {
+			p_flgcb = p_flgcb_table[i];
+			p_flginib = &(aflginib_table[j]);
+			p_flginib->flgatr = TA_NOEXS;
+			p_flgcb->p_flginib = ((const FLGINIB *) p_flginib);
+			queue_insert_prev(&free_flgcb, &(p_flgcb->wait_queue));
 		}
 	}
 }
@@ -165,6 +190,128 @@ check_flg_cond(FLGCB *p_flgcb, FLGPTN waiptn, MODE wfmode, FLGPTN *p_flgptn)
 #endif /* TOPPERS_flgcnd */
 
 /*
+ *  イベントフラグの生成
+ *
+ *  pk_cflg->iflgptnは，エラーチェックをせず，一度しか参照しないため，
+ *  ローカル変数にコピーする必要がない（途中で書き換わっても支障がな
+ *  い）．
+ */
+#ifdef TOPPERS_acre_flg
+
+#ifndef LOG_ACRE_FLG_ENTER
+#define LOG_ACRE_FLG_ENTER(pk_cflg)
+#endif /* LOG_ACRE_FLG_ENTER */
+
+#ifndef LOG_ACRE_FLG_LEAVE
+#define LOG_ACRE_FLG_LEAVE(ercd)
+#endif /* LOG_ACRE_FLG_LEAVE */
+
+ER_ID
+acre_flg(const T_CFLG *pk_cflg)
+{
+	FLGCB	*p_flgcb;
+	FLGINIB	*p_flginib;
+	ATR		flgatr;
+	ER		ercd;
+
+	LOG_ACRE_FLG_ENTER(pk_cflg);
+	CHECK_TSKCTX_UNL();
+
+	flgatr = pk_cflg->flgatr;
+
+	CHECK_VALIDATR(flgatr, TA_TPRI|TA_WMUL|TA_CLR);
+
+	lock_cpu();
+	acquire_glock();
+	if (tnum_flg == tnum_sflg || queue_empty(&free_flgcb)) {
+		ercd = E_NOID;
+	}
+	else {
+		p_flgcb = ((FLGCB *) queue_delete_next(&free_flgcb));
+		p_flginib = (FLGINIB *)(p_flgcb->p_flginib);
+		p_flginib->flgatr = flgatr;
+		p_flginib->iflgptn = pk_cflg->iflgptn;
+
+		queue_initialize(&(p_flgcb->wait_queue));
+		p_flgcb->flgptn = p_flgcb->p_flginib->iflgptn;
+		ercd = FLGID(p_flgcb);
+	}
+	release_glock();
+	unlock_cpu();
+
+  error_exit:
+	LOG_ACRE_FLG_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_acre_flg */
+
+/*
+ *  イベントフラグの削除
+ */
+#ifdef TOPPERS_del_flg
+
+#ifndef LOG_DEL_FLG_ENTER
+#define LOG_DEL_FLG_ENTER(flgid)
+#endif /* LOG_DEL_FLG_ENTER */
+
+#ifndef LOG_DEL_FLG_LEAVE
+#define LOG_DEL_FLG_LEAVE(ercd)
+#endif /* LOG_DEL_FLG_LEAVE */
+
+ER
+del_flg(ID flgid)
+{
+	FLGCB	*p_flgcb;
+	FLGINIB	*p_flginib;
+	ER		ercd;
+	TCB		*p_selftsk;
+	PCB		*p_my_pcb;
+
+	LOG_DEL_FLG_ENTER(flgid);
+	CHECK_TSKCTX_UNL_MYSTATE(&p_selftsk);
+	CHECK_ID(VALID_FLGID(flgid));
+	p_flgcb = get_flgcb(flgid);
+
+	lock_cpu();
+	acquire_glock();
+	p_my_pcb = get_my_pcb();
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (flgid <= tmax_sflgid) {
+		ercd = E_OBJ;
+	}
+	else {
+		/*
+		 *  待ちタスクがいても削除は成功し，待ちタスクはE_DLTで強制
+		 *  解除される．init_wait_queueはMP対応済み（wait.c:215-228）で，
+		 *  既存のini_flgと同一の機構である．新規の解除機構は書かない．
+		 */
+		init_wait_queue(p_my_pcb, &(p_flgcb->wait_queue));
+		p_flginib = (FLGINIB *)(p_flgcb->p_flginib);
+		p_flginib->flgatr = TA_NOEXS;
+		queue_insert_prev(&free_flgcb, &(p_flgcb->wait_queue));
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
+	release_glock();
+  unlock_and_exit:
+	unlock_cpu();
+
+  error_exit:
+	LOG_DEL_FLG_LEAVE(ercd);
+	return(ercd);
+}
+
+#endif /* TOPPERS_del_flg */
+
+/*
  *  イベントフラグのセット
  */
 #ifdef TOPPERS_set_flg
@@ -189,33 +336,38 @@ set_flg(ID flgid, FLGPTN setptn)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	p_flgcb->flgptn |= setptn;
-	p_queue = p_flgcb->wait_queue.p_next;
-	while (p_queue != &(p_flgcb->wait_queue)) {
-		p_tcb = (TCB *) p_queue;
-		p_queue = p_queue->p_next;
-		p_winfo_flg = (WINFO_FLG *)(&(p_tcb->winfo_obj));
-		if (check_flg_cond(p_flgcb, p_winfo_flg->waiptn,
-							p_winfo_flg->wfmode, &(p_winfo_flg->waiptn))) {
-			queue_delete(&(p_tcb->task_queue));
-			wait_complete(p_my_pcb, p_tcb);
-			if ((p_flgcb->p_flginib->flgatr & TA_CLR) != 0U) {
-				break;
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		p_flgcb->flgptn |= setptn;
+		p_queue = p_flgcb->wait_queue.p_next;
+		while (p_queue != &(p_flgcb->wait_queue)) {
+			p_tcb = (TCB *) p_queue;
+			p_queue = p_queue->p_next;
+			p_winfo_flg = (WINFO_FLG *)(&(p_tcb->winfo_obj));
+			if (check_flg_cond(p_flgcb, p_winfo_flg->waiptn,
+								p_winfo_flg->wfmode, &(p_winfo_flg->waiptn))) {
+				queue_delete(&(p_tcb->task_queue));
+				wait_complete(p_my_pcb, p_tcb);
+				if ((p_flgcb->p_flginib->flgatr & TA_CLR) != 0U) {
+					break;
+				}
 			}
 		}
-	}
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		if (!context) {
-			release_glock();
-			dispatch();
-			ercd = E_OK;
-			goto unlock_and_exit;
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			if (!context) {
+				release_glock();
+				dispatch();
+				ercd = E_OK;
+				goto unlock_and_exit;
+			}
+			else {
+				request_dispatch_retint();
+			}
 		}
-		else {
-			request_dispatch_retint();
-		}
+		ercd = E_OK;
 	}
-	ercd = E_OK;
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -245,8 +397,13 @@ clr_flg(ID flgid, FLGPTN clrptn)
 
 	lock_cpu();
 	acquire_glock();
-	p_flgcb->flgptn &= clrptn; 
-	ercd = E_OK;
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		p_flgcb->flgptn &= clrptn; 
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 
@@ -281,7 +438,10 @@ wai_flg(ID flgid, FLGPTN waiptn, MODE wfmode, FLGPTN *p_flgptn)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_selftsk->raster) {
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if ((p_flgcb->p_flginib->flgatr & TA_WMUL) == 0U
@@ -335,7 +495,10 @@ pol_flg(ID flgid, FLGPTN waiptn, MODE wfmode, FLGPTN *p_flgptn)
 
 	lock_cpu();
 	acquire_glock();
-	if ((p_flgcb->p_flginib->flgatr & TA_WMUL) == 0U
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if ((p_flgcb->p_flginib->flgatr & TA_WMUL) == 0U
 					&& !queue_empty(&(p_flgcb->wait_queue))) {
 		ercd = E_ILUSE;
 	}
@@ -380,7 +543,10 @@ twai_flg(ID flgid, FLGPTN waiptn, MODE wfmode, FLGPTN *p_flgptn, TMO tmout)
 	lock_cpu_dsp();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();	
-	if (p_selftsk->raster) {
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_selftsk->raster) {
 		ercd = E_RASTER;
 	}
 	else if ((p_flgcb->p_flginib->flgatr & TA_WMUL) == 0U
@@ -439,15 +605,20 @@ ini_flg(ID flgid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	init_wait_queue(p_my_pcb, &(p_flgcb->wait_queue));
-	p_flgcb->flgptn = p_flgcb->p_flginib->iflgptn;
-	if (p_selftsk != p_my_pcb->p_schedtsk) {
-		release_glock();
-		dispatch();
-		ercd = E_OK;
-		goto unlock_and_exit;
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
 	}
-	ercd = E_OK;
+	else {
+		init_wait_queue(p_my_pcb, &(p_flgcb->wait_queue));
+		p_flgcb->flgptn = p_flgcb->p_flginib->iflgptn;
+		if (p_selftsk != p_my_pcb->p_schedtsk) {
+			release_glock();
+			dispatch();
+			ercd = E_OK;
+			goto unlock_and_exit;
+		}
+		ercd = E_OK;
+	}
 	release_glock();
   unlock_and_exit:
 	unlock_cpu();
@@ -477,9 +648,14 @@ ref_flg(ID flgid, T_RFLG *pk_rflg)
 
 	lock_cpu();
 	acquire_glock();
-	pk_rflg->wtskid = wait_tskid(&(p_flgcb->wait_queue));
-	pk_rflg->flgptn = p_flgcb->flgptn;
-	ercd = E_OK;
+	if (p_flgcb->p_flginib->flgatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else {
+		pk_rflg->wtskid = wait_tskid(&(p_flgcb->wait_queue));
+		pk_rflg->flgptn = p_flgcb->flgptn;
+		ercd = E_OK;
+	}
 	release_glock();
 	unlock_cpu();
 

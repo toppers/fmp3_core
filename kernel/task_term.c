@@ -193,7 +193,10 @@ ras_ter(ID tskid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_tcb->p_pcb != p_my_pcb) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_tcb->p_pcb != p_my_pcb) {
 		/* 異なるプロセッサに割り付けられているタスクならエラーとする */
 		ercd = E_OBJ;
 	}
@@ -359,7 +362,10 @@ ter_tsk(ID tskid)
 	lock_cpu();
 	acquire_glock();
 	p_my_pcb = get_my_pcb();
-	if (p_tcb->p_pcb != p_my_pcb) {
+	if (p_tcb->p_tinib->tskatr == TA_NOEXS) {
+		ercd = E_NOEXS;
+	}
+	else if (p_tcb->p_pcb != p_my_pcb) {
 		/* 異なるプロセッサに割り付けられているタスクならエラーとする */
 		ercd = E_OBJ;
 	}
