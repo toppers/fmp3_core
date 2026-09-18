@@ -562,21 +562,39 @@ sio_irdy_snd(EXINF exinf)
 	if (p_spcb->rcv_fc_chr != '\0') {
 		/*
 		 *  START/STOPを送信する．
+		 *
+		 *  送信できたときだけ送信済みにする（下の送信バッファと同じ理由）．
 		 */
-		(void) sio_snd_chr(p_spcb->p_siopcb, p_spcb->rcv_fc_chr);
-		p_spcb->rcv_fc_chr = '\0';
+		if (sio_snd_chr(p_spcb->p_siopcb, p_spcb->rcv_fc_chr)) {
+			p_spcb->rcv_fc_chr = '\0';
+		}
 	}
 	else if (!(p_spcb->snd_stopped) && p_spcb->snd_count > 0U) {
 		/*
 		 *  送信バッファ中から文字を取り出して送信する．
+		 *
+		 *  【送信できたときだけバッファから取り除く】
+		 *  sio_snd_chr が false を返すことは，本コールバックの契約
+		 *  （「送信できるようになったら呼ぶ」）の下では起こらないはずで
+		 *  あるが，同じSIOポートへドライバを経由せずに書く経路（低レベル
+		 *  出力 target_fput_log 等）がターゲットに在ると，送信可能通知か
+		 *  ら本関数が sio_snd_chr を呼ぶまでの間にその経路が送信レジスタ
+		 *  を埋めてしまうことがある．戻り値を捨てて読出しポインタを進め
+		 *  ると，その1文字はバッファから消えて二度と送信されない．
+		 *  （ESP32-P4 の USB-Serial/JTAG で実測．1行あたり1文字が落ち，
+		 *   捨てた文字数と欠けた文字数が一致した．）
+		 *  送信できなかった場合はバッファを動かさない．snd_count が 0 に
+		 *  ならないので送信可能コールバックは禁止されず，次に送信可能に
+		 *  なったときに同じ文字から再開する．
 		 */
-		(void) sio_snd_chr(p_spcb->p_siopcb,
-					p_spcb->p_spinib->snd_buffer[p_spcb->snd_read_ptr]);
-		INC_PTR(p_spcb->snd_read_ptr, p_spcb->p_spinib->snd_bufsz);
-		if (p_spcb->snd_count == p_spcb->p_spinib->snd_bufsz) {
-			semid = p_spcb->p_spinib->snd_semid;
+		if (sio_snd_chr(p_spcb->p_siopcb,
+					p_spcb->p_spinib->snd_buffer[p_spcb->snd_read_ptr])) {
+			INC_PTR(p_spcb->snd_read_ptr, p_spcb->p_spinib->snd_bufsz);
+			if (p_spcb->snd_count == p_spcb->p_spinib->snd_bufsz) {
+				semid = p_spcb->p_spinib->snd_semid;
+			}
+			p_spcb->snd_count--;
 		}
-		p_spcb->snd_count--;
 	}
 	else {
 		/*
