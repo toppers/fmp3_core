@@ -208,7 +208,42 @@ riscv_tas_uint32(volatile uint32_t *p_var)
 {
     uint32_t  failed;
     
-#if USE_RISCV_LLSC
+#if !defined(__riscv_atomic)
+/*
+ *  A 拡張（アトミック命令）を持たないチップ向けの実装
+ *
+ *  ESP32-C3 の ISA は RV32IMC で、`amoswap` も `lr/sc` も**命令として存在
+ *  しない**（ESP32-C6 以降は RV32IMAC）。上の 2 経路はどちらも A 拡張を
+ *  前提にしているため、そのままではアセンブルできない。
+ *
+ *  単一プロセッサに限れば、割込みを禁止したうえでの「読んで、0 なら書く」
+ *  は不可分である（他に競合するハートが無く、同一ハート上の割込みは
+ *  mstatus.MIE で止まっているため）。よってこの経路は
+ *  **TNUM_PRCID == 1 のときだけ**正しい。2 プロセッサ以上で A 拡張が無い
+ *  構成は成立しないので、下で `#error` にして黙って通さない。
+ *
+ *  `__riscv_atomic` は -march に 'a' が含まれるとコンパイラが定義する。
+ *  既存チップ（C6 / C5 / P4）は A 拡張つきなのでこの分岐に入らず、
+ *  **生成コードは 1 バイトも変わらない**。
+ */
+#if defined(TNUM_PRCID) && (TNUM_PRCID >= 2)
+#error "RISC-V without the A extension cannot host TNUM_PRCID >= 2 (no atomic test-and-set)."
+#endif
+    {
+        ulong_t  saved;
+
+        /* 割込み禁止（mstatus.MIE をクリアし、元の値を保存） */
+        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(MSTATUS_MIE));
+        failed = *p_var;
+        if (failed == 0U) {
+            *p_var = 1U;
+        }
+        /* MIE が立っていたときだけ戻す */
+        if ((saved & MSTATUS_MIE) != 0U) {
+            Asm("csrs mstatus, %0" :: "r"(MSTATUS_MIE));
+        }
+    }
+#elif USE_RISCV_LLSC
     Asm("lr.w.aq  %0, (%1)     \n"
         "bnez     %0, 1f       \n"
         "sc.w.rl  %0, %2, (%1) \n"  /* succeed $0 = 0, fail $0 = nonezero */

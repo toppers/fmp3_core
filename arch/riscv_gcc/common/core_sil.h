@@ -153,7 +153,25 @@ TOPPERS_test_and_assign(volatile uint32_t *p_var, uint32_t prcid)
 {
     uint32_t  failed;
 
-#if USE_RISCV_LLSC
+#if !defined(__riscv_atomic)
+    /*  A 拡張なし（RV32IMC）向け。理由と適用範囲は riscv_insn.h の
+     *  riscv_tas_uint32() のコメントを読むこと。  */
+#if defined(TNUM_PRCID) && (TNUM_PRCID >= 2)
+#error "RISC-V without the A extension cannot host TNUM_PRCID >= 2 (no atomic test-and-assign)."
+#endif
+    {
+        ulong_t  saved;
+
+        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(MSTATUS_MIE));
+        failed = *p_var;
+        if (failed == 0U) {
+            *p_var = prcid;
+        }
+        if ((saved & MSTATUS_MIE) != 0U) {
+            Asm("csrs mstatus, %0" :: "r"(MSTATUS_MIE));
+        }
+    }
+#elif USE_RISCV_LLSC
     Asm("lr.w.aq  %0, (%1)     \n"
         "bnez     %0, 1f       \n"
         "sc.w.rl  %0, %2, (%1) \n"  /* succeed $0 = 0, fail $0 = nonezero */
