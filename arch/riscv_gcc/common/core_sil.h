@@ -160,15 +160,19 @@ TOPPERS_test_and_assign(volatile uint32_t *p_var, uint32_t prcid)
 #error "RISC-V without the A extension cannot host TNUM_PRCID >= 2 (no atomic test-and-assign)."
 #endif
     {
+        /*  mstatus.MIE のビット。riscv.h の MSTATUS_MIE と同値だが、
+         *  このヘッダは riscv.h を include しない（他ターゲットの
+         *  include 依存を増やさないため、この経路の中だけで完結させる）。  */
+        const ulong_t  mie_bit = UINT_C(0x00000008);
         ulong_t  saved;
 
-        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(MSTATUS_MIE));
+        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(mie_bit));
         failed = *p_var;
         if (failed == 0U) {
             *p_var = prcid;
         }
-        if ((saved & MSTATUS_MIE) != 0U) {
-            Asm("csrs mstatus, %0" :: "r"(MSTATUS_MIE));
+        if ((saved & mie_bit) != 0U) {
+            Asm("csrs mstatus, %0" :: "r"(mie_bit));
         }
     }
 #elif USE_RISCV_LLSC

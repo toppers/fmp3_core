@@ -230,17 +230,20 @@ riscv_tas_uint32(volatile uint32_t *p_var)
 #error "RISC-V without the A extension cannot host TNUM_PRCID >= 2 (no atomic test-and-set)."
 #endif
     {
+        /*  mstatus.MIE のビット。riscv.h の MSTATUS_MIE と同値だが、
+         *  このヘッダは riscv.h を include しない（他ターゲットの
+         *  include 依存を増やさないため、この経路の中だけで完結させる）。  */
+        const ulong_t  mie_bit = UINT_C(0x00000008);
         ulong_t  saved;
 
-        /* 割込み禁止（mstatus.MIE をクリアし、元の値を保存） */
-        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(MSTATUS_MIE));
+        Asm("csrrc %0, mstatus, %1" : "=r"(saved) : "r"(mie_bit));
         failed = *p_var;
         if (failed == 0U) {
             *p_var = 1U;
         }
         /* MIE が立っていたときだけ戻す */
-        if ((saved & MSTATUS_MIE) != 0U) {
-            Asm("csrs mstatus, %0" :: "r"(MSTATUS_MIE));
+        if ((saved & mie_bit) != 0U) {
+            Asm("csrs mstatus, %0" :: "r"(mie_bit));
         }
     }
 #elif USE_RISCV_LLSC
